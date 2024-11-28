@@ -1,0 +1,282 @@
+---
+title: "Ion_channel"
+author: "Simon Haugaard"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required R libraries
+```{r library}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("edgeR", "readr", "readxl", "biomaRt", "magrittr", "tibble", "stringr", 
+               "ggplot2", "data.table", "patchwork", "openxlsx", "aamisc", "limma", 
+               "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset", "tidyr")
+
+# install aamisc package for MDS and Volcano plots if not already done
+# Uncomment if needed to install the aamisc package
+#pacman::p_load("qvalue", "rain", "limma", "devtools")
+#url <- "https://cran.r-project.org/src/contrib/Archive/HarmonicRegression/HarmonicRegression_1.0.tar.gz"
+#pkgFile <- "HarmonicRegression_1.0.tar.gz"
+#download.file(url = url, destfile = pkgFile)
+#install.packages(pkgs=pkgFile, type="source", repos=NULL)
+#file.remove(pkgFile)
+#pacman::p_load_gh("altintasali/aamisc")
+
+# Color scheme and shapes for figures
+RA_colors <- c("#003049", "#0073af")
+LA_colors <- c("#d62828", "#e77d7d")
+RV_colors <- c("#ff7f00", "#ffb266")
+LV_colors <- c("#fcbf49", "#fee2ad")
+# Shape 16 (circle) for Control and Shape 17 (triangle) for AF
+condition_shapes <- c("Control" = 16, "AF" = 17)
+chamber_colors <- c("RA" = "#003049", "LA" = "#d62828", "RV" = "#ff7f00", "LV" = "#fcbf49")
+chamber_fill_colors <- c("RA" = "#0073af", "LA" = "#e77d7d", "RV" = "#ffb266", "LV" = "#fee2ad")
+
+
+```
+
+# Read data
+
+## Count matrix and metadata
+```{r read_data}
+# Load count data from a local TSV file and metadata through Excel
+meta_file <- "../../../data/metadata/meta.xlsx" 
+meta <- readxl::read_excel(meta_file)
+
+count_file <- "../../../data/count/gene-expression-all-reverse-stranded-countReadPairs.tsv"
+count <- readr::read_delim(count_file)
+
+# Gene annotation
+geneinfo_file <- "../../../data/gene_annotation/horse_gene_annotation.tsv.gz"
+geneinfo <- fread(geneinfo_file)
+colnames(geneinfo)
+
+# Load DGE
+dge_file <- "../../01_dge/output/dge_results.tsv.gz" 
+dge <- fread(dge_file)
+
+# Load logCPM 
+logCPM_file <- "../../01_dge/output/Log2_TMM_normalized_CPM_values.csv"
+logCPM <- fread(logCPM_file)
+
+# Rename columns
+setnames(geneinfo, new = c("ENSEMBL", "ENSEMBLv", "Description_detailed", 
+                           "Chr", "Start", "End", "Strand", "GENENAME", "ENTREZID", "Description"))
+# Remove unnecessary columns
+geneinfo <- geneinfo[, c("ENSEMBLv", "Description_detailed") := NULL]
+
+# Remove duplicate entries based on ENSEMBL ID
+geneinfo <- geneinfo[!duplicated(ENSEMBL), ]
+
+# Convert annotation data to data frame and set rownames to ENSEMBL IDs
+annot <- merge(x = count[,c("Geneid", "Length")], 
+               y = geneinfo, 
+               by.x = "Geneid",
+               by.y = "ENSEMBL", 
+               all.x = TRUE, 
+               all.y = FALSE)
+
+setnames(annot, old = "Geneid", new = "ENSEMBL")
+annot <- data.frame(annot)
+rownames(annot) <- annot$ENSEMBL
+
+# Clean metadata and ensure it matches the count data
+meta <- meta %>% remove_rownames %>% column_to_rownames(var="Sample_ID")
+head(meta)
+
+count <- count[, -c(2:6)]
+
+# Set "Geneid" as rownames and remove from the data frame for easy manipulation
+count <- count %>% remove_rownames %>% column_to_rownames(var="Geneid")
+head(count)
+```
+# Ion-Channels in Health Figure (Figure 1)
+```{r}
+# Import and prepare data
+ion_channel_file <- "../../../data/gene_annotation/ion-channel-masterlist.xlsx"
+ion_channel_list <- read_excel(ion_channel_file, sheet = 1)
+
+# Clean the ion channel list to keep structure and remove NA values
+ion_channel_list_clean <- lapply(ion_channel_list, function(x) x[!is.na(x)])
+
+# Create an ordered vector of unique gene names to preserve the order and remove duplicates
+ordered_gene_names <- unique(unlist(ion_channel_list_clean, use.names = FALSE))
+
+# Set the first column `V1` as rownames of `logCPM`
+if (!exists("logCPM_control")) {  # Check if the filtered logCPM for control samples already exists
+  logCPM <- as.data.frame(logCPM)
+  rownames(logCPM) <- logCPM$V1
+  logCPM <- logCPM[, -1]  # Remove `V1` column
+  
+  # Filter metadata to include only "Control" horses
+  control_meta <- meta[meta$Group == "Control", ]
+  
+  # Subset logCPM to include only samples from "Control" horses
+  control_samples <- rownames(control_meta)
+  logCPM_control <- logCPM[, control_samples, drop = FALSE]
+}
+
+# Map gene names in `ordered_gene_names` to ENSEMBL IDs using `annot`
+ensembl_ids <- annot$ENSEMBL[annot$GENENAME %in% ordered_gene_names]
+
+# Subset logCPM matrix to include only rows corresponding to these ENSEMBL IDs
+ion_channel_logCPM_control <- logCPM_control[rownames(logCPM_control) %in% ensembl_ids, , drop = FALSE]
+
+# Map ENSEMBL IDs back to gene symbols for better readability
+gene_symbols <- annot$GENENAME[match(rownames(ion_channel_logCPM_control), annot$ENSEMBL)]
+rownames(ion_channel_logCPM_control) <- gene_symbols
+
+# Transform to long format for ggplot
+ion_channel_logCPM_control_long <- as.data.frame(ion_channel_logCPM_control) %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>%
+  merge(control_meta, by.x = "Sample", by.y = "row.names")
+
+# Convert `Gene` to a factor with levels based on unique `ordered_gene_names` to avoid duplication errors
+ion_channel_logCPM_control_long$Gene <- factor(ion_channel_logCPM_control_long$Gene, levels = unique(ordered_gene_names))
+
+# Convert `Region` to a factor to ensure the desired order of regions: LA, RA, LV, RV
+ion_channel_logCPM_control_long$Region <- factor(ion_channel_logCPM_control_long$Region, levels = c("LA", "RA", "LV", "RV"))
+
+# Calculate mean expression for each gene within each region, based only on "Control" horses
+ion_channel_summary_control <- ion_channel_logCPM_control_long %>%
+  group_by(Gene, Region) %>%
+  summarise(
+    Mean_Expression = mean(Expression),
+    .groups = "drop"
+  )
+
+# Create the bar plot using ggplot2 with custom gene and region orders and aesthetic styles
+# Reduce `position_dodge` width to create more spacing between bars
+ion_channel_barplot_control <- ggplot(ion_channel_summary_control, aes(x = Gene, y = Mean_Expression, fill = Region, color = Region)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), size = 0.5, alpha = 0.85, width = 0.6) +  # Adjust bar width to avoid overlap
+  scale_fill_manual(values = chamber_fill_colors) +  # Custom fill colors for each region
+  scale_color_manual(values = chamber_colors) +      # Custom border colors for each region
+  theme_minimal(base_size = 14) +
+  labs(title = "Mean Expression of Ion Channel Genes Across Heart Chambers (Control Horses)",
+       x = "Ion Channel Genes",
+       y = "Mean Log2(TMM-normalized CPM)") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"),  # Rotate and bold x-axis labels
+    axis.title = element_text(size = 16, face = "bold"),  # Bold axis titles
+    legend.position = "right",  # Place legend on the right side
+    legend.title = element_text(size = 14, face = "bold"),  # Bold legend title
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),  # Centered and bold plot title
+    panel.grid.major = element_line(color = "grey90"),  # Use light grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.ticks.x = element_blank()  # Remove x-axis ticks for a cleaner look
+  ) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 8)) +  # Wrap x-axis labels for better readability
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2)))  # Add extra space at the top of the y-axis
+
+# Define dimensions to fit an A4 page width (11.7 inches) and standard height
+plot_width <- 11.7  # A4 page width in inches
+plot_height <- 6    # Set appropriate height for the plot
+
+# Display the plot
+print(ion_channel_barplot_control)
+
+# Optionally save the plot for publication use
+ggsave(filename = "../output/Mean_Ion_Channel_Gene_Expression_Across_Heart_Chambers_Control.png", 
+       plot = ion_channel_barplot_control, width = plot_width, height = plot_height, dpi = 600)  # Save at high resolution
+
+```
+
+# Supplementary bar plot on calcium handling genes
+```{r}
+# Define a custom list of calcium handling genes
+calcium_gene_list <- c("ATP2A1", "ATP2A2", "CALM1", "CALM2", "CALM3", "CASQ1", "CASQ2", "PLB", "PLN", "RYR1", "RYR2", "INSP3R1", "INSP3R2")
+
+# Filter metadata to include only "Control" horses
+control_meta <- meta[meta$Group == "Control", ]
+
+# Subset logCPM to include only samples from "Control" horses
+control_samples <- rownames(control_meta)
+logCPM_control <- logCPM[, control_samples]
+
+# Map gene names in `calcium_gene_list` to ENSEMBL IDs using `annot`
+calcium_ensembl_ids <- annot$ENSEMBL[annot$GENENAME %in% calcium_gene_list]
+
+# Subset logCPM matrix to include only rows corresponding to these ENSEMBL IDs
+calcium_logCPM_control <- logCPM_control[rownames(logCPM_control) %in% calcium_ensembl_ids, , drop = FALSE]
+
+# Map ENSEMBL IDs back to gene symbols for better readability
+calcium_gene_symbols <- annot$GENENAME[match(rownames(calcium_logCPM_control), annot$ENSEMBL)]
+rownames(calcium_logCPM_control) <- calcium_gene_symbols
+
+# Transform to long format for ggplot
+calcium_logCPM_control_long <- as.data.frame(calcium_logCPM_control) %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>%
+  merge(control_meta, by.x = "Sample", by.y = "row.names")
+
+# Convert `Gene` to a factor with levels based on the order of `calcium_gene_list` to maintain order in the plot
+calcium_logCPM_control_long$Gene <- factor(calcium_logCPM_control_long$Gene, levels = calcium_gene_list)
+
+# Convert `Region` to a factor to ensure the desired order of regions: LA, RA, LV, RV
+calcium_logCPM_control_long$Region <- factor(calcium_logCPM_control_long$Region, levels = c("LA", "RA", "LV", "RV"))
+
+
+# Calculate mean expression for each gene within each region, based only on "Control" horses
+calcium_summary_control <- calcium_logCPM_control_long %>%
+  group_by(Gene, Region) %>%
+  summarise(
+    Mean_Expression = mean(Expression),
+    .groups = "drop"
+  )
+
+# Create the bar plot using ggplot2 with custom gene and region orders and aesthetic styles
+calcium_barplot_control <- ggplot(calcium_summary_control, aes(x = Gene, y = Mean_Expression, fill = Region, color = Region)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), size = 0.5, alpha = 0.85, width = 0.6) +  # Adjust bar width to avoid overlap
+  scale_fill_manual(values = chamber_fill_colors) +  # Custom fill colors for each region
+  scale_color_manual(values = chamber_colors) +      # Custom border colors for each region
+  theme_minimal(base_size = 14) +
+  labs(title = "Mean Expression of Calcium Handling Genes Across Heart Chambers (Control Horses)",
+       x = "Calcium Handling Genes",
+       y = "Mean Log2(TMM-normalized CPM)") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"),  # Rotate and bold x-axis labels
+    axis.title = element_text(size = 16, face = "bold"),  # Bold axis titles
+    legend.position = "right",  # Place legend on the right side
+    legend.title = element_text(size = 14, face = "bold"),  # Bold legend title
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),  # Centered and bold plot title
+    panel.grid.major = element_line(color = "grey90"),  # Use light grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.ticks.x = element_blank()  # Remove x-axis ticks for a cleaner look
+  ) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 8)) +  # Wrap x-axis labels for better readability
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2)))  # Add extra space at the top of the y-axis
+
+# Define dimensions to fit one-third of an A4 page width (3.9 inches) and standard height
+plot_width <- 3.9  # One-third of A4 page width in inches
+plot_height <- 6   # Maintain appropriate height for readability
+
+# Display the plot
+print(calcium_barplot_control)
+
+# Optionally save the plot for publication use with adjusted width
+ggsave(
+  filename = "../output/Mean_Calcium_Handling_Gene_Expression_Across_Heart_Chambers_Control.png", 
+  plot = calcium_barplot_control, 
+  width = plot_width, 
+  height = plot_height, 
+  dpi = 600  # Save at high resolution for publication quality
+)
+
+```
+# Session Info
+```{r session_info}
+sessionInfo()
+```

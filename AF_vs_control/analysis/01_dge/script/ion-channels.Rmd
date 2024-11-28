@@ -1,0 +1,523 @@
+---
+title: "Ion_channel"
+author: "Simon Haugaard"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required R libraries
+```{r library}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("edgeR", "readr", "readxl", "biomaRt", "magrittr", "tibble", "stringr", 
+               "ggplot2", "data.table", "patchwork", "openxlsx", "aamisc", "limma", 
+               "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset")
+
+# install aamisc package for MDS and Volcano plots if not already done
+# Uncomment if needed to install the aamisc package
+#pacman::p_load("qvalue", "rain", "limma", "devtools")
+#url <- "https://cran.r-project.org/src/contrib/Archive/HarmonicRegression/HarmonicRegression_1.0.tar.gz"
+#pkgFile <- "HarmonicRegression_1.0.tar.gz"
+#download.file(url = url, destfile = pkgFile)
+#install.packages(pkgs=pkgFile, type="source", repos=NULL)
+#file.remove(pkgFile)
+#pacman::p_load_gh("altintasali/aamisc")
+
+# Color scheme and shapes for figures
+RA_colors <- c("#003049", "#0073af")
+LA_colors <- c("#d62828", "#e77d7d")
+RV_colors <- c("#ff7f00", "#ffb266")
+LV_colors <- c("#fcbf49", "#fee2ad")
+# Shape 16 (circle) for Control and Shape 17 (triangle) for AF
+condition_shapes <- c("Control" = 16, "AF" = 17)
+chamber_colors <- c("RA" = "#003049", "LA" = "#d62828", "RV" = "#ff7f00", "LV" = "#fcbf49")
+chamber_fill_colors <- c("RA" = "#0073af", "LA" = "#e77d7d", "RV" = "#ffb266", "LV" = "#fee2ad")
+
+
+```
+
+# Read data
+
+## Count matrix and metadata
+```{r read_data}
+# Load count data from a local TSV file and metadata through Excel
+meta_file <- "../../../data/metadata/meta.xlsx" 
+meta <- readxl::read_excel(meta_file)
+
+# Gene annotation
+geneinfo_file <- "../../../data/gene_annotation/horse_gene_annotation.tsv.gz"
+geneinfo <- fread(geneinfo_file)
+colnames(geneinfo)
+
+# Load DGE
+dge_file <- "../../01_dge/output/dge_results.tsv.gz" 
+dge <- fread(dge_file)
+
+# Load logCPM 
+logCPM_file <- "../../01_dge/output/Log2_TMM_normalized_CPM_values.csv"
+logCPM <- fread(logCPM_file)
+
+# Rename columns
+setnames(geneinfo, new = c("ENSEMBL", "ENSEMBLv", "Description_detailed", 
+                           "Chr", "Start", "End", "Strand", "GENENAME", "ENTREZID", "Description"))
+# Remove unnecessary columns
+geneinfo <- geneinfo[, c("ENSEMBLv", "Description_detailed") := NULL]
+
+# Remove duplicate entries based on ENSEMBL ID
+geneinfo <- geneinfo[!duplicated(ENSEMBL), ]
+
+# Convert annotation data to data frame and set rownames to ENSEMBL IDs
+annot <- merge(x = count[,c("Geneid", "Length")], 
+               y = geneinfo, 
+               by.x = "Geneid",
+               by.y = "ENSEMBL", 
+               all.x = TRUE, 
+               all.y = FALSE)
+setnames(annot, old = "Geneid", new = "ENSEMBL")
+annot <- data.frame(annot)
+rownames(annot) <- annot$ENSEMBL
+
+fwrite(x = annot, 
+       file = "../../../data/gene_annotation/horse_gene_annotation_filtered.tsv.gz", 
+       sep = "\t")
+
+# Clean metadata and ensure it matches the count data
+meta <- meta %>% remove_rownames %>% column_to_rownames(var="Sample_ID")
+head(meta)
+
+count <- count[, -c(2:6)]
+
+# Set "Geneid" as rownames and remove from the data frame for easy manipulation
+count <- count %>% remove_rownames %>% column_to_rownames(var="Geneid")
+head(count)
+```
+
+#Ionchannel differences in logCPM
+##Using GO Annotation
+```{r ionchannels}
+#Get GO annotation 
+go_file <- "../../../data/gene_annotation/horse_GO.tsv.gz"
+go <- fread(go_file)
+go <- go[, c("Gene stable ID", "GO term accession", "GO term name", "GO domain")]
+setnames(go, new = c("ENSEMBL", "GOID", "Description", "GOdomain"))
+go <- go[GOdomain != "", ]
+
+#Filter for GO:0034702  ("ion channel complex")
+go_0034702 <- go[GOID == "GO:0034702", "ENSEMBL"]
+ionchannel_logCPM <- as.data.frame(logCPM[row.names(logCPM) %in% go_0034702[["ENSEMBL"]], ])
+ionchannel_logCPM_with_genes <- merge(ionchannel_logCPM, annot, by.x = "row.names", by.y = "ENSEMBL", all.x = TRUE)
+ionchannel_melted <- data.table::melt(ionchannel_logCPM_with_genes)
+setnames(x = ionchannel_melted, 
+         old = c("GENENAME", "variable", "value"),
+         new = c("Gene", "Sample", "logCPM"))
+ionchannel_melted <- data.table::merge.data.table(x = ionchannel_melted, 
+                                              y = data.table(Sample = rownames(meta), meta), 
+                                              by = "Sample")
+#Plot 
+library(dplyr)
+mean_expression <- ionchannel_melted %>% group_by(Gene, Condition, Region, Group) %>%
+  summarize(mean_logCPM = mean(logCPM, na.rm = TRUE))
+
+ggplot(mean_expression, aes(mean_logCPM, y = Gene, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Mean Relative Expression of Genes in Each Atrium",
+       x = "Gene",
+       y = "Mean logCPM",
+       fill = "Group") +
+  facet_wrap(~ Region, scales = "free") +
+  theme_classic()
+```
+
+##Curated ion-channel list
+```{r}
+ion_channel_list <- c(
+    "SCN1A", "SCN2A", "SCN3A", "SCN4A", "SCN5A", "SCN7A", "SCN8A", "SCN9A", "SCN10A", "SCN11A",
+    "KCNQ1", "KCNQ2", "KCNQ3", "KCNQ4", "KCNQ5", "KCNN1", "KCNN2", "KCNN3",
+    "CACNA1C", "CACNA1D", "CACNA1F", "CACNA1S", "CACNA1A", "CACNA1B", "CACNA1E", "CACNA1H",
+    "CACNA2D1", "CACNA2D2", "CACNA2D3", "CACNA2D4",
+    "CACNB1", "CACNB2", "CACNB3", "CACNB4",
+    "TRPC1", "TRPC2", "TRPC3", "TRPC4", "TRPC5", "TRPC6", "TRPC7",
+    "TRPM1", "TRPM2", "TRPM3", "TRPM4", "TRPM5", "TRPM6", "TRPM7", "TRPM8",
+    "TRPV1", "TRPV2", "TRPV3", "TRPV4", "TRPV5", "TRPV6", "CACNA1G", "KCND2", "KCND3", "KCNA4", "KCNA7", "KCNC4", 
+    "KCNA5", "KCNC1", "KCNH2", "KCNQ1", "KCNJ2", "KCNJ12", "KCNJ11", 
+    "KCNJ3", "KCNJ5", "KCNK1", "KCNK6", "KCNK3", "KCNK4", "HCN1", "HCN2", "HCN4",
+    "SK1", "SK2", "SK3", "SLC8A1", "SLC8A2", "SLC8A3",
+    "ATP2A1", "ATP2A2", "ATP2A3",
+    "CASQ1", "CASQ2", "RYR1", "RYR2", "PLN",
+    "GJA1", "GJA2", "GJA3", "GJA4",  "GJA5", "GJA6", "KCNA3",  "KCNA6",  "KCNB1",  "KCNC3",  "KCND1",  "KCNH8",  "KCNJ1",  "KCNJ15", "KCNJ13", "KCNJ4",  "KCNJ14", "KCNJ9",  "KCNG1",  "KCNG4")
+ion_channel_list <- annot[annot$GENENAME %in% ion_channel_list, c("GENENAME", "ENSEMBL")]
+ion_channel_list<- ion_channel_list[order(ion_channel_list$GENENAME), ]
+
+#Remove missing values and create datatable
+missing_ids <- setdiff(ion_channel_list$ENSEMBL, rownames(logCPM))
+print(missing_ids)
+ion_channel_list <- ion_channel_list[!ion_channel_list$ENSEMBL %in% missing_ids, ]
+ionchannel_logCPM <- as.data.frame(logCPM[row.names(logCPM) %in% ion_channel_list$ENSEMBL, ])
+ionchannel_logCPM_with_genes <- merge(ionchannel_logCPM, annot, by.x = "row.names", by.y = "ENSEMBL", all.x = TRUE)
+ionchannel_melted <- data.table::melt(ionchannel_logCPM_with_genes)
+setnames(x = ionchannel_melted, 
+         old = c("GENENAME", "variable", "value"),
+         new = c("Gene", "Sample", "logCPM"))
+ionchannel_melted <- data.table::merge.data.table(x = ionchannel_melted, 
+                                              y = data.table(Sample = rownames(meta), meta), 
+                                              by = "Sample")
+
+#Plot 
+mean_expression <- ionchannel_melted %>% group_by(Gene, Condition, Region, Group) %>%
+  summarize(mean_logCPM = mean(logCPM, na.rm = TRUE))
+
+fwrite(x = mean_expression, 
+       file = "../../../analysis/03_ion-channel/output/ion-channellist.tsv", 
+       sep = "\t")
+openxlsx::write.xlsx(x = mean_expression, file = "../../../analysis/03_ion-channel/output/ion-channellist.xlsx", asTable = TRUE)
+
+
+ggplot(mean_expression, aes(mean_logCPM, y = Gene, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Mean Relative Expression of Genes in Each Condition",
+       x = "Gene",
+       y = "Mean logCPM",
+       fill = "Group") +
+  facet_wrap(~ Region, scales = "free") +
+  theme_classic()
+
+#Plot with * indicating significance
+sig_ionchannels <- res_all[res_all$ENSEMBL %in% ion_channel_list$ENSEMBL & res_all$adj.P.Val < 0.05, ]
+sig_RA_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_RA", "GENENAME"]
+sig_LA_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_LA", "GENENAME"]
+sig_RV_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_RV", "GENENAME"]
+sig_LV_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_LV", "GENENAME"]
+sig_atria_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "Avr.Dis.Effect_Atrial", "GENENAME"]
+sig_left_right_atria <- sig_ionchannels[sig_ionchannels$Contrast == "RA_vs_LA_control", "GENENAME"]
+sig_left_right_ventricular <- sig_ionchannels[sig_ionchannels$Contrast == "RV_vs_LV_control", "GENENAME"]
+
+mean_expression <- mean_expression %>%
+  mutate(
+    Contrast = ifelse(Region == "LA", "AF_vs_control_LA", "AF_vs_control_RA"),
+    Significant = ifelse((Region == "LA" & Gene %in% sig_LA_ionchannels) |
+                         (Region == "RA" & Gene %in% sig_RA_ionchannels), TRUE, FALSE)
+  )
+
+# I cant make a star to indicate significance, #TODO! 
+ggplot(mean_expression, aes(mean_logCPM, y = Gene, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(data = mean_expression %>% filter(Significant & Region == "LA"), 
+            aes(label = Gene), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 4, 
+            fontface = "bold") +  
+  geom_text(data = mean_expression %>% filter(Significant & Region == "RA"), 
+            aes(label = Gene), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 4, 
+            fontface = "bold") +  
+    geom_text(data = mean_expression %>% filter(Significant & Region == "LV"), 
+            aes(label = Gene), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 4, 
+            fontface = "bold") +  
+  
+  labs(title = "Mean Relative Expression of Genes in Each Condition",
+       x = "Mean logCPM",
+       y = "Gene",
+       fill = "Group") +
+  facet_wrap(~ Region, scales = "free") +
+  theme_classic()
+
+```
+
+#Attempt to create pheatmap of ionchannel genes
+```{r}
+#All regions
+library(pheatmap)
+ion_channel_ensembl <- annot[annot$GENENAME %in% ion_channel_list$GENENAME, c("GENENAME", "ENSEMBL")]
+subset_logCPM <- logCPM_batchRemoved[rownames(logCPM_batchRemoved) %in% ion_channel_ensembl$ENSEMBL, ]
+rownames(subset_logCPM) <- ion_channel_ensembl$GENENAME[match(rownames(subset_logCPM), ion_channel_ensembl$ENSEMBL)]
+pheatmap(subset_logCPM,
+         annotation_col = meta_reordered[, c("Group", "Region")],
+         scale = "row",
+         show_rownames = TRUE)
+
+
+#LA only sig genes
+LA_subset_logCPM <- subset_logCPM[, row.names(meta)[meta$Region == "LA"]]
+LA_subset_logCPM <- LA_subset_logCPM[row.names(LA_subset_logCPM) %in% sig_LA_ionchannels, ]
+pheatmap(LA_subset_logCPM,
+         annotation_col = meta_reordered[, c("Condition", "Group")],
+         scale = "row",
+         show_rownames = TRUE)
+
+#RA only
+RA_subset_logCPM <- subset_logCPM[, row.names(meta)[meta$Region == "RA"]]
+RA_subset_logCPM <- RA_subset_logCPM[row.names(RA_subset_logCPM) %in% sig_RA_ionchannels, ]
+pheatmap(RA_subset_logCPM,
+         annotation_col = meta_reordered[, c("Condition", "Group")],
+         scale = "row",
+         show_rownames = TRUE)
+
+
+
+```
+
+#Curated gene_list_ventricular
+```{r}
+
+ventricular_channel_list <- c("CACNA1C", "CACNB2", "CACNA1D", "CACNA1G", "HCN2", "KCNJ2", "KCNJ4", "KCNJ8", "KCNJ11", "KCNH2","KCNQ1", "KCNE1", "KCNA5", "SCN5A", "ATP1A3", "SLC8A1", "KCND2", "KCND3", "KCNA4", "KCNIP2", "SERCA2A", "PLN", "RYR2")
+  
+ventricular_channel_list <- annot[annot$GENENAME %in% ventricular_channel_list, c("GENENAME", "ENSEMBL")]
+ventricular_channel_list<- ventricular_channel_list[order(ventricular_channel_list$GENENAME), ]
+
+#Remove missing values and create datatable
+missing_ids <- setdiff(ventricular_channel_list$ENSEMBL, rownames(logCPM_batchRemoved))
+print(missing_ids)
+ventricular_channel_list <- ventricular_channel_list[!ventricular_channel_list$ENSEMBL %in% missing_ids, ]
+ionchannel_logCPM_batchRemoved <- as.data.frame(logCPM_batchRemoved[row.names(logCPM_batchRemoved) %in% ventricular_channel_list$ENSEMBL, ])
+ionchannel_logCPM_with_genes <- merge(ionchannel_logCPM, annot, by.x = "row.names", by.y = "ENSEMBL", all.x = TRUE)
+ionchannel_melted <- data.table::melt(ionchannel_logCPM_with_genes)
+setnames(x = ionchannel_melted, 
+         old = c("GENENAME", "variable", "value"),
+         new = c("Gene", "Sample", "logCPM"))
+ionchannel_melted <- data.table::merge.data.table(x = ionchannel_melted, 
+                                              y = data.table(Sample = rownames(meta), meta), 
+                                              by = "Sample")
+
+#Plot 
+mean_expression <- ionchannel_melted %>% group_by(Gene, Condition, Region, Group) %>%
+  summarize(mean_logCPM = mean(logCPM, na.rm = TRUE))
+
+ggplot(mean_expression, aes(mean_logCPM, y = Gene, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Mean Relative Expression of Genes in Each Condition",
+       x = "Gene",
+       y = "Mean logCPM",
+       fill = "Group") +
+  facet_wrap(~ Region, scales = "free") +
+  theme_classic()
+
+#Heatmaps
+ventricular_channel_ensembl <- annot[annot$GENENAME %in% ventricular_channel_list$GENENAME, c("GENENAME", "ENSEMBL")]
+subset_logCPM <- logCPM[rownames(logCPM) %in% ventricular_channel_ensembl$ENSEMBL, ]
+rownames(subset_logCPM) <- ventricular_channel_ensembl$GENENAME[match(rownames(subset_logCPM), ventricular_channel_ensembl$ENSEMBL)]
+pheatmap(subset_logCPM,
+         annotation_col = meta_reordered[, c("Region", "Group")],
+         scale = "row",
+         show_rownames = TRUE)
+
+sig_ionchannels <- res_all[res_all$ENSEMBL %in% ventricular_channel_list$ENSEMBL & res_all$adj.P.Val < 0.05, ]
+sig_RA_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_RA", "GENENAME"]
+sig_LA_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_LA", "GENENAME"]
+sig_RV_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_RV", "GENENAME"]
+sig_LV_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "AF_vs_control_LV", "GENENAME"]
+sig_atria_ionchannels <- sig_ionchannels[sig_ionchannels$Contrast == "Avr.Dis.Effect_Atrial", "GENENAME"]
+sig_left_right_atria <- sig_ionchannels[sig_ionchannels$Contrast == "RA_vs_LA_control", "GENENAME"]
+sig_left_right_ventricular <- sig_ionchannels[sig_ionchannels$Contrast == "RV_vs_LV_control", "GENENAME"]
+
+sig_atrio_ventricular <- sig_ionchannels[sig_ionchannels$Contrast == "AverageRegionEffect_AV_healthy", "GENENAME"]
+
+
+
+#RA only sig genes
+RA_subset_logCPM <- subset_logCPM[, row.names(meta)[meta$Region == "RA"]]
+RA_subset_logCPM <- RA_subset_logCPM[row.names(RA_subset_logCPM) %in% sig_RA_ionchannels, ]
+pheatmap(RA_subset_logCPM,
+         annotation_col = meta_reordered[, c("Condition", "Group")],
+         scale = "row",
+         show_rownames = TRUE)
+
+
+
+```
+
+#For Toronto Meeting
+##Define function for plotting set of ion-channels in health
+```{r}
+library(ggplot2)
+library(dplyr)
+library(data.table)
+
+#KU-red color palette
+KUred <- c("#ECD9D9", "#DDBBBB", "#B05D5F", "#A6494B")
+useKUred <- colorRampPalette(KUred)
+
+
+
+plot_gene_expression <- function(gene_list, logCPM, annot, meta) {
+  # Filter annotation data for the specified gene list
+  gene_annotation <- annot[annot$GENENAME %in% gene_list, c("GENENAME", "ENSEMBL")]
+  
+  # Remove missing values
+  missing_ids <- setdiff(gene_annotation$ENSEMBL, rownames(logCPM))
+  gene_annotation <- gene_annotation[!gene_annotation$ENSEMBL %in% missing_ids, ]
+  
+  # Merge logCPM data with annotation and metadata
+  gene_data <- merge(as.data.frame(logCPM_batchRemoved[row.names(logCPM_batchRemoved) %in% gene_annotation$ENSEMBL, ]), 
+                     gene_annotation, by.x = "row.names", by.y = "ENSEMBL", all.x = TRUE)
+  gene_melted <- data.table::melt(gene_data, id.vars = c("GENENAME"))
+  setnames(gene_melted, 
+           old = c("GENENAME", "variable", "value"),
+           new = c("Gene", "Sample", "logCPM"))
+  gene_melted <- data.table::merge.data.table(x = gene_melted, 
+                                               y = data.table(Sample = rownames(meta), meta), 
+                                               by = "Sample")
+  gene_melted$Region <- factor(gene_melted$Region, levels = c("LA", "RA", "LV", "RV"))
+  gene_melted <- gene_melted %>%
+    filter(Group == "Control")
+  
+  gene_melted$logCPM <- as.numeric(gene_melted$logCPM)
+  gene_melted <- gene_melted[!is.na(gene_melted$logCPM), ]
+  
+  # Calculate mean and standard deviation
+  mean_expression <- gene_melted %>% 
+    group_by(Gene, Region) %>% 
+    summarize(mean_logCPM = mean(logCPM, na.rm = TRUE),
+              sd_logCPM = sd(logCPM, na.rm = TRUE))
+  
+  # Plot
+  ggplot() +
+    geom_col(data = mean_expression, aes(x = Gene, y = mean_logCPM, fill = Region), 
+             position = position_dodge(width = 0.9), alpha = 0.5) +
+    geom_errorbar(data = mean_expression, aes(x = Gene, y = mean_logCPM, ymin = mean_logCPM - sd_logCPM, ymax = mean_logCPM + sd_logCPM, color = Region), 
+                  position = position_dodge(width = 0.9), width = 0.25, alpha = 0.6) +
+    geom_point(data = gene_melted, aes(x = Gene, y = logCPM, color = Region), 
+               position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), alpha = 0.6) +
+    labs(title = " ",
+         x = " ",
+         y = "Relative expression (logCPM)",
+         color = "Region",
+         fill = "Region") +
+    theme_classic() +
+    theme(legend.position = "bottom")
+}
+
+# Example usage:
+gene_list <- c("CACNA1C", "CACNA1D", "CACNA1G", "CACNA1H", "CACNA2D2", "CACNA2D1")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+```
+
+#Example of KU red
+```{r}
+# Define the KUred color palette
+KUred <- c("#ECD9D9", "#DDBBBB", "#B05D5F", "#A6494B")
+KUalt <- c("#A6494B", "#784972", "#3C4C69", "#2F4858")
+KUalt <- c("#671D24", "#B05D5F", "#574141", "#999999")
+
+
+plot_gene_expression <- function(gene_list, logCPM, annot, meta) {
+  # Filter annotation data for the specified gene list
+  gene_annotation <- annot[annot$GENENAME %in% gene_list, c("GENENAME", "ENSEMBL")]
+  
+  # Remove missing values
+  missing_ids <- setdiff(gene_annotation$ENSEMBL, rownames(logCPM))
+  gene_annotation <- gene_annotation[!gene_annotation$ENSEMBL %in% missing_ids, ]
+  
+  # Merge logCPM data with annotation and metadata
+  gene_data <- merge(logCPM[rownames(logCPM) %in% gene_annotation$ENSEMBL, ], 
+                     gene_annotation, by.x = "row.names", by.y = "ENSEMBL", all.x = TRUE)
+  gene_melted <- data.table::melt(gene_data, id.vars = c("GENENAME"))
+  setnames(gene_melted, 
+           old = c("GENENAME", "variable", "value"),
+           new = c("Gene", "Sample", "logCPM"))
+  gene_melted <- data.table::merge.data.table(x = gene_melted, 
+                                               y = data.table(Sample = rownames(meta), meta), 
+                                               by = "Sample")
+  gene_melted$Region <- factor(gene_melted$Region, levels = c("LA", "RA", "LV", "RV"))
+  gene_melted <- gene_melted %>%
+    dplyr::filter(Group == "Control")
+  
+  gene_melted$logCPM <- as.numeric(gene_melted$logCPM)
+  gene_melted <- gene_melted[!is.na(gene_melted$logCPM), ]
+  
+  # Calculate mean and standard deviation
+  mean_expression <- gene_melted %>% 
+    dplyr::group_by(Gene, Region) %>% 
+    dplyr::summarize(mean_logCPM = mean(logCPM, na.rm = TRUE),
+              sd_logCPM = sd(logCPM, na.rm = TRUE))
+  
+  # Define region-specific colors using the custom palette
+  region_colors <- setNames(KUalt, levels(gene_melted$Region))
+  
+  # Plot
+  ggplot() +
+    geom_col(data = mean_expression, aes(x = Gene, y = mean_logCPM, fill = Region), 
+             position = position_dodge(width = 0.9), alpha = 0.8) +
+    scale_fill_manual(values = region_colors) +
+    geom_errorbar(data = mean_expression, aes(x = Gene, y = mean_logCPM, ymin = mean_logCPM - sd_logCPM, ymax = mean_logCPM + sd_logCPM, color = Region), 
+                  position = position_dodge(width = 0.9), width = 0.25, alpha = 0.7) +
+    scale_color_manual(values = region_colors) +
+    geom_point(data = gene_melted, aes(x = Gene, y = logCPM, color = Region), 
+               position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.85), alpha = 0.95) +
+    labs(title = "Gene Expression by Region",
+         x = "Gene",
+         y = "Relative expression (logCPM)",
+         color = "Region",
+         fill = "Region") +
+    theme_classic() +
+    theme(legend.position = "bottom")
+}
+
+gene_list <- c("CACNA1C", "CACNA1D", "CACNA1G", "CACNA1H", "CACNA2D2", "CACNA2D1")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+
+
+```
+
+
+##Connexins
+```{r}
+gene_list <- c("GJA1", "GJA2", "GJA3","GJA4", "GJA5", "GJA6", "GJC1")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+```
+
+##Sodium channels
+```{r}
+gene_list <- c("SCN1A", "SCN2A", "SCN3A", "SCN5A", "SCN9A", "SCN7A", "SCN8A", "SCN10A", "SCN1B", "SCNB3", "SCN6A", "SCN7A", "SCN4B")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+
+gene_list <- c("SCN1A", "SCN2A", "SCN3A", "SCN5A", "SCN9A", "SCN7A", "SCN8A", "SCN10A", "SCN1B", "SCNB3", "SCN6A", "SCN7A", "SLC12A2", "SLC12A1")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+
+```
+##Voltage-gated potassium
+```{r}
+gene_list <- c("KCNH2", "KCNQ1", "KCND3", "KCNA4", "KCNA5")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+
+```
+##Indwardly rectifying potassium channels
+```{r}
+gene_list <- c("KCNJ3", "KCNJ5", "KCNJ12", "KCNJ2", "KCNJ4", "KCNIP2")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+
+```
+##SK channels
+```{r}
+gene_list <- c("KCNN1", "KCNN2", "KCNN3")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+
+```
+
+
+##HCN-channels
+```{r}
+gene_list <- c("HCN1", "HCN2", "HCN3", "HCN4")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+```
+
+#Caclium-handling and signalling
+```{r}
+gene_list <- c("ATP2A1", "ATP2A2", "CALM1", "CALM2", "CALM3", "CASQ1", "CASQ2", "PLB", "PLN", "RYR1", "RYR2", "INSP3R1", "INSP3R2")
+plot_gene_expression(gene_list, logCPM, annot, meta)
+```
+#For Leguilette

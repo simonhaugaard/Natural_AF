@@ -1,0 +1,524 @@
+---
+title: "Gene enrichment analysis"
+author: "Simon Haugaard"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Gene enrichment analysis
+This script performs gene ontology (GO) and KEGG enrichment analysis on differential gene expression results.
+The analysis uses predefined contrasts and statistical cut-offs for both differential expression and enrichment analysis.
+Required R libraries are loaded, and the input data files are read, processed, and analyzed using `clusterProfiler`.
+
+## Required R libraries
+```{r libraries}
+# Install `pacman` if not already available
+if (!require("pacman")) install.packages("pacman")
+
+# Use `pacman` to load and manage required packages
+pacman::p_load("magrittr")           # Piping operations (%>%)
+pacman::p_load("data.table")         # High-performance data manipulation
+pacman::p_load("clusterProfiler")    # GO and pathway enrichment analysis
+pacman::p_load("stringi")            # String manipulation (e.g., regex operations)
+pacman::p_load("httr")               # HTTP requests for web API interactions (e.g., Revigo)
+pacman::p_load("ggplot2")       
+pacman::p_load("jsonlite")           # JSON handling for processing Revigo responses
+pacman::p_load_gh("altintasali/aamisc") # Custom library for MDS, dot plots, and enrichment visualization
+
+# Ensure `aamisc` is installed from GitHub if not already available.
+# `aamisc` provides custom visualization functions such as `dotplotEnrich` used in this analysis.
+if (!requireNamespace("aamisc", quietly = TRUE)) {
+  if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")  # Install `devtools` if not already installed
+  devtools::install_github("altintasali/aamisc")  # Install `aamisc` from GitHub
+  library(aamisc)  # Load `aamisc`
+}
+
+# Verify that `httr` and `jsonlite` are correctly installed and loaded for web requests
+if (!requireNamespace("httr", quietly = TRUE)) install.packages("httr")
+if (!requireNamespace("jsonlite", quietly = TRUE)) install.packages("jsonlite")
+```
+
+
+
+## Read data
+```{r read_data}
+# read data
+dge_file <- "../../01_correlation/output/dge_results.tsv.gz"
+dge <- fread(dge_file)
+
+
+dge[, Direction := ifelse(logFC > 0, "up", "down")]
+dge[, ENTREZID := as.character(ENTREZID)]
+
+dge <- dge[Contrast %in% c("Natural_vs_Induced_AF_LA", "Natural_vs_Induced_AF_RA", "Average_Natural_vs_Induced_AF")]
+
+# DGE results with only valid Entrez IDs
+dge_entrez <- dge[!is.na(ENTREZID),]
+
+# significance cut-off
+dge_cut <- 0.05
+enrich_cut <- 0.05
+```
+
+The analysis will be performed according to following statistical cutoffs.
+
+- *Differential gene expression:* adjusted p-value (FDR) < `r dge_cut`
+- *Enrichment analysis:* adjusted p-value (Q-value) < `r enrich_cut`
+
+# GO
+
+We can use "ENSEMBL" IDs for **GO** enrichment analysis as the downloaded ontology information has more ENSEMBL IDs within a GO ontology more than ENTREZ (NCBI Gene) IDs. 
+
+```{r go}
+# Read and clean GO data for enrichment analysis.
+# The GO data file contains mappings between gene identifiers (ENSEMBL) and GO terms.
+go_file <- "../../../data/gene_annotation/horse_GO.tsv.gz"
+go <- fread(go_file)
+
+# Select and rename relevant columns for compatibility with clusterProfiler.
+go <- go[, c("Gene stable ID", "GO term accession", "GO term name", "GO domain")]
+setnames(go, new = c("ENSEMBL", "GOID", "Description", "GOdomain"))
+
+# Filter out rows without a specified GO domain to retain only valid GO entries.
+go <- go[GOdomain != "", ]
+
+# Prepare two lists required for GO enrichment analysis:
+# - term2gene: A mapping of GO terms (GOID) to ENSEMBL gene IDs.
+# - term2name: A mapping of GO terms (GOID) to their respective descriptions.
+term2gene <- split(go[,c("GOID", "ENSEMBL")], f = go$GOdomain)
+term2name <- split(go[,c("GOID", "Description")], f = go$GOdomain)
+
+# The term2gene and term2name lists will be used in subsequent enrichment analyses with clusterProfiler.
+```
+
+## ORA - Overrepresentation Analysis for Gene Ontology (GO) Terms
+```{r go_ora}
+# Split the DGE results by contrast for individual enrichment analysis.
+dge_split <- split(dge, f = dge$Contrast)
+
+# Initialize an empty list to store enrichment analysis results.
+go_ora <- list()
+
+# Loop over different gene sets ("all", "up", "down") and GO databases.
+for(k in c("all", "up", "down")){
+  for (j in names(term2gene)){
+    for (i in names(dge_split)){
+      message(paste0("Running GO ORA for '", i, "'", " within ", j, " ('", k, "' genes)"))
+
+      # Select genes based on the specified direction and significance cut-off.
+      if(k == "all"){
+        gene <- dge_split[[i]][adj.P.Val < dge_cut, ENSEMBL]
+      } else if(k == "up"){
+        gene <- dge_split[[i]][adj.P.Val < dge_cut & Direction == "up", ENSEMBL]
+      } else if(k == "down"){
+        gene <- dge_split[[i]][adj.P.Val < dge_cut & Direction == "down", ENSEMBL]
+      }
+      
+      # Skip analysis if no significant genes are found.
+      if(length(gene) == 0){
+        warning("No DEG found, skipping...\n")
+        next
+      }
+      
+      # Define the "universe" of genes for enrichment testing.
+      universe <- dge_split[[i]][, ENSEMBL]
+      
+      # Run enrichment analysis using the `enricher` function from clusterProfiler.
+      # Use `tryCatch()` to handle cases where enrichment returns an empty result.
+      go_ora[[i]][[j]][[k]] <- tryCatch(
+        {
+          enricher(gene = gene, 
+                   TERM2GENE = term2gene[[j]],    # Mapping of GO terms to genes
+                   TERM2NAME = term2name[[j]],    # Mapping of GO terms to descriptions
+                   pAdjustMethod = "BH",          # Use Benjamini-Hochberg correction for p-values
+                   pvalueCutoff = dge_cut,        # Set p-value cut-off
+                   qvalueCutoff = enrich_cut,     # Set q-value cut-off
+                   minGSSize = 10,                # Minimum number of genes in a GO term
+                   maxGSSize = 500,               # Maximum number of genes in a GO term
+                   universe = universe            # Background universe of genes for testing
+          )@result
+        },
+        error = function(e){
+          message(paste("Error in ORA for", i, "within", j, "for", k, "direction:", e$message))
+          NULL
+        }
+      )
+      
+      # If the result is not empty, add contrast, database, and direction annotations.
+      if (!is.null(go_ora[[i]][[j]][[k]])) {
+        go_ora[[i]][[j]][[k]]$Contrast <- i
+        go_ora[[i]][[j]][[k]]$Database <- j
+        go_ora[[i]][[j]][[k]]$Direction <- k
+      }
+    }
+  }
+}
+
+# Combine the results into a single data table for downstream analysis and visualization.
+go_ora_res <- do.call(rbind, go_ora %>% unlist(recursive=FALSE) %>% unlist(recursive = F)) %>% setDT
+
+# Display the first few rows of the combined enrichment results.
+head(go_ora_res)
+
+# Filter and display significant enrichment results based on the defined q-value cut-off.
+go_ora_res[qvalue < enrich_cut, ]
+
+# (Optional) Create output data files - Uncomment if you want to save the results locally.
+ fwrite(x = go_ora_res, file = "../output/GO_ora.tsv.gz", sep = "\t")
+ go_ora_split <- split(go_ora_res, f = go_ora_res$Contrast)
+ openxlsx::write.xlsx(x = go_ora_split, file = "../output/GO_ora.xlsx", asTable = TRUE)
+
+# Define a custom function to perform enrichment plotting for a given contrast, excluding the "all" direction.
+plot_single_contrast_enrichment <- function(enrichment_results, contrast, file_prefix = "GO_enrichment") {
+  
+  # Subset the enrichment results based on the specified contrast.
+  filtered_results <- enrichment_results[Contrast == contrast]
+  
+  # Exclude the "all" direction from the results.
+  filtered_results <- filtered_results[Direction != "all"]
+  
+  # Skip if there are no results to plot.
+  if (nrow(filtered_results) == 0) {
+    message(paste0("No enrichment results found for contrast: ", contrast, ", skipping plot..."))
+    return()
+  }
+  
+  # Generate the enrichment dot plot.
+  enrichment_plot <- aamisc::dotplotEnrich(
+    dt = filtered_results, 
+    topn = 10, 
+    topn.pref = "qval", 
+    qcut = enrich_cut, 
+    nchar = 60, 
+    direction = "Direction", 
+    group = "Contrast", 
+    dot = "GeneRatio", 
+    qval = "qvalue", 
+    term.id = "ID",
+    term.name = "Description"
+  )
+  
+  # Display the plot
+  print(enrichment_plot)
+  
+  # Save the plot with a specified file name
+  ggsave(
+    filename = paste0("../output/", file_prefix, "_", contrast, ".png"), 
+    plot = enrichment_plot, 
+    width = 8, 
+    height = 7, 
+    dpi = 600)
+}
+
+# Define your individual contrasts of interest as a vector
+individual_contrasts <- c("Natural_vs_Induced_AF_RA", "Average_Natural_vs_Induced_AF")
+
+
+# Loop through each contrast and generate a plot for each contrast separately
+for (contrast in individual_contrasts) {
+  plot_single_contrast_enrichment(enrichment_results = go_ora_res, contrast = contrast, file_prefix = "Individual_GO_enrichment")
+}
+
+```
+
+
+
+
+## GSEA
+```{r go_gsea}
+go_gsea <- list()
+
+for (j in names(term2gene)){
+    for (i in names(dge_split)){
+        message(paste0("Running GO GSEA for '", i, "'", " within ", j))
+        geneList <- dge_split[[i]]$logFC
+        names(geneList) <- dge_split[[i]]$ENSEMBL
+        geneList <- sort(geneList, decreasing = TRUE)
+        
+        result <- GSEA(geneList = geneList, 
+                       TERM2GENE = term2gene[[j]], 
+                       TERM2NAME = term2name[[j]], 
+                       pvalueCutoff = enrich_cut,
+                       minGSSize = 10, 
+                       maxGSSize = 500, 
+                       eps = 0, 
+                       nPermSimple = 1000 # TODO: set it to 1 million for robust results
+        )@result
+        
+        # Check if the result data frame is not empty before assigning values
+        if (nrow(result) > 0) {
+            result$Contrast <- i
+            result$Database <- j
+        }
+        
+        go_gsea[[i]][[j]] <- result
+    }
+}
+
+
+go_gsea_res <- do.call(rbind, go_gsea %>% unlist(recursive=FALSE)) %>% setDT
+head(go_gsea_res)
+go_gsea_res[qvalue < enrich_cut,]
+go_gsea_res[, direction := ifelse(NES < 0, "down", "up")]
+
+#Output data
+go_gsea_res_split <- split(go_gsea_res, f = go_gsea_res$Contrast)
+
+openxlsx::write.xlsx(x = go_gsea_res_split, file = "../../02_gene-enrichment/output/GO_gsea.xlsx", asTable = TRUE)
+fwrite(x = go_gsea_res_split, file = "../../02_gene-enrichment/output/go_gsea.tsv.gz", sep = "\t")
+
+# Custom function to plot GSEA enrichment results for each contrast
+plot_gsea_enrichment <- function(gsea_results_split, contrasts, file_prefix = "GSEA_enrichment", topn = 10, qcut = 0.05) {
+  
+  # Loop through each specified contrast
+  for (contrast in contrasts) {
+    # Check if the contrast exists in the GSEA results split list
+    if (!contrast %in% names(gsea_results_split)) {
+      message(paste0("Contrast ", contrast, " not found in GSEA results, skipping..."))
+      next
+    }
+    
+    # Subset the GSEA results for the current contrast
+    contrast_results <- gsea_results_split[[contrast]]
+    
+    # Skip if the contrast results are empty or have no significant terms
+    if (is.null(contrast_results) || nrow(contrast_results) == 0) {
+      message(paste0("No significant GSEA results found for contrast: ", contrast, ", skipping plot..."))
+      next
+    }
+    
+    # Generate the enrichment dot plot
+    gsea_plot <- aamisc::dotplotEnrich(
+      dt = contrast_results, 
+      topn = topn, 
+      topn.pref = "qval", 
+      qcut = qcut, 
+      nchar = 60, 
+      direction = "direction", 
+      group = "Contrast", 
+      dot = "NES", 
+      qval = "qvalue", 
+      term.id = "ID",
+      term.name = "Description"
+    )
+    
+    # Display the plot
+    print(gsea_plot)
+    
+    # Save the plot with a specified file name
+    ggsave(
+      filename = paste0("../output/", file_prefix, "_", contrast, ".png"), 
+      plot = gsea_plot, 
+    width = 8, 
+    height = 7, 
+      dpi = 600
+    )
+  }
+}
+
+# Define your individual contrasts of interest
+gsea_contrasts <- c("Natural_vs_Induced_AF_LA", "Natural_vs_Induced_AF_RA", "Average_Natural_vs_Induced_AF")
+
+# Run the custom function to generate GSEA enrichment plots for all specified contrasts
+plot_gsea_enrichment(gsea_results_split = go_gsea_res_split, contrasts = gsea_contrasts, file_prefix = "Individual_GSEA_enrichment")
+
+
+```
+
+
+# KEGG
+
+## ORA 
+
+```{r kegg_ora}
+KEGG_ora_all <- compareCluster(ENTREZID ~ Contrast, 
+                          data          = dge_entrez[adj.P.Val < dge_cut,],
+                          fun           = "enrichKEGG",
+                          universe      = dge_entrez[, ENTREZID],
+                          organism      = "ecb",
+                          pAdjustMethod = "BH",
+                          minGSSize     = 10,
+                          maxGSSize     = 500,
+                          pvalueCutoff  = enrich_cut,
+                          qvalueCutoff  = enrich_cut)@compareClusterResult %>% setDT
+KEGG_ora_all$Direction <- "all"
+aamisc::moveMeDataTable(KEGG_ora_all, tomove = "Direction", where = "after", ba = "Contrast")
+
+KEGG_ora_upDown <- compareCluster(ENTREZID ~ Contrast + Direction, 
+                             data          = dge_entrez[adj.P.Val < dge_cut,],
+                             fun           = "enrichKEGG",
+                             universe      = dge_entrez[, ENTREZID],
+                             organism      = "ecb",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = enrich_cut,
+                             qvalueCutoff  = enrich_cut)@compareClusterResult %>% setDT
+
+KEGG_ora <- rbindlist(list(KEGG_ora_all, KEGG_ora_upDown))
+fwrite(x = KEGG_ora, file = "../../02_gene-enrichment/output/kegg_ora.tsv.gz", sep = "\t")
+
+KEGG_ora_split <- split(KEGG_ora, f = KEGG_ora$Contrast)
+
+
+openxlsx::write.xlsx(x = KEGG_ora_split, file = "../../02_gene-enrichment/output/kegg_ora.xlsx", asTable = TRUE)
+
+# Custom function to plot KEGG enrichment results for each contrast
+plot_kegg_enrichment <- function(kegg_results_split, contrasts, file_prefix = "KEGG_enrichment", topn = 10, qcut = 0.05) {
+  
+  # Loop through each specified contrast
+  for (contrast in contrasts) {
+    # Check if the contrast exists in the KEGG results split list
+    if (!contrast %in% names(kegg_results_split)) {
+      message(paste0("Contrast ", contrast, " not found in KEGG results, skipping..."))
+      next
+    }
+    
+    # Subset the KEGG results for the current contrast
+    contrast_results <- kegg_results_split[[contrast]]
+    
+    # Skip if the contrast results are empty or have no significant terms
+    if (is.null(contrast_results) || nrow(contrast_results) == 0) {
+      message(paste0("No significant KEGG results found for contrast: ", contrast, ", skipping plot..."))
+      next
+    }
+    
+    # Generate the enrichment dot plot
+    kegg_plot <- aamisc::dotplotEnrich(
+      dt = contrast_results, 
+      topn = topn, 
+      topn.pref = "qval", 
+      qcut = qcut, 
+      nchar = 60, 
+      direction = "Direction", 
+      group = "Contrast", 
+      dot = "GeneRatio", 
+      qval = "qvalue", 
+      term.id = "ID",
+      term.name = "Description"
+    )
+    
+    # Display the plot
+    print(kegg_plot)
+    
+    # Save the plot with a specified file name
+    ggsave(
+      filename = paste0("../../02_gene-enrichment/output/", file_prefix, "_", contrast, ".png"), 
+      plot = kegg_plot, 
+    width = 8, 
+    height = 7, 
+      dpi = 600
+    )
+  }
+}
+
+# Define your individual contrasts of interest
+kegg_contrasts <- c("Natural_vs_Induced_AF_LA", "Natural_vs_Induced_AF_RA", "Average_Natural_vs_Induced_AF")
+
+# Run the custom function to generate KEGG enrichment plots for all specified contrasts
+plot_kegg_enrichment(kegg_results_split = KEGG_ora_split, contrasts = kegg_contrasts, file_prefix = "Individual_KEGG_enrichment")
+```
+
+
+## GSEA 
+```{r kegg_gsea}
+dge_split <- split(dge_entrez, f = dge_entrez$Contrast)
+kegg_gsea <- list()
+
+for (i in names(dge_split)){
+  geneList <- dge_split[[i]]$logFC
+  names(geneList) <- dge_split[[i]]$ENTREZID
+  geneList <- sort(geneList, decreasing = TRUE)
+  
+  kegg_gsea[[i]] <-  gseKEGG(geneList     = geneList,
+                        organism     = 'ecb',
+                        pvalueCutoff = enrich_cut,
+                        minGSSize = 10, 
+                        maxGSSize = 500, 
+                        eps = 0, 
+                        nPermSimple = 10000, # TODO: set it to 1 million for robust results
+                        verbose      = TRUE
+                        )@result %>% setDT
+  kegg_gsea[[i]][, Direction := ifelse(test = NES > 0, yes = "up", no = "down"), ]
+  kegg_gsea[[i]]$Contrast <- i
+}
+
+openxlsx::write.xlsx(x = kegg_gsea, file = "../../02_gene-enrichment/output/kegg_gsea.xlsx", asTable = TRUE)
+kegg_gsea <- rbindlist(kegg_gsea, fill = TRUE)
+fwrite(x = kegg_gsea, file = "../../02_gene-enrichment/output/kegg_gsea.tsv.gz", sep = "\t")
+
+kegg_gsea_split <- split(kegg_gsea, f = kegg_gsea$Contrast)
+
+# Custom function to plot predefined KEGG GSEA results for each contrast separately
+plot_predefined_kegg_gsea <- function(kegg_gsea_split, 
+                                      predefined_contrasts = c(
+                                        "AF_vs_control_LA",
+                                        "AF_vs_control_RA",
+                                        "AF_vs_control_LV",
+                                        "AF_vs_control_RV",
+                                        "AverageRegionEffect_AV_healthy",
+                                        "RA_vs_LA_control"
+                                      ), 
+                                      file_prefix = "KEGG_GSEA_enrichment", 
+                                      topn = 10, 
+                                      qcut = 0.05) {
+  
+  # Loop through each contrast in the predefined list
+  for (contrast in predefined_contrasts) {
+    
+    # Check if the contrast exists in the split list
+    if (!contrast %in% names(kegg_gsea_split)) {
+      message(paste0("Contrast ", contrast, " not found in KEGG GSEA results, skipping..."))
+      next
+    }
+    
+    # Subset the KEGG GSEA results for the current contrast
+    contrast_results <- kegg_gsea_split[[contrast]]
+    
+    # Skip if the contrast results are empty or have no significant terms
+    if (is.null(contrast_results) || nrow(contrast_results) == 0) {
+      message(paste0("No significant KEGG GSEA results found for contrast: ", contrast, ", skipping plot..."))
+      next
+    }
+    
+    # Generate the enrichment dot plot for the current contrast
+    kegg_gsea_plot <- aamisc::dotplotEnrich(
+      dt = contrast_results, 
+      topn = topn, 
+      topn.pref = "qval", 
+      qcut = qcut, 
+      nchar = 60, 
+      direction = "Direction", 
+      group = "Contrast", 
+      dot = "NES", 
+      qval = "qvalue", 
+      term.id = "ID",
+      term.name = "Description"
+    )
+    
+    # Display the plot for the current contrast
+    print(kegg_gsea_plot)
+    
+    # Save the plot with a specified file name
+    ggsave(
+      filename = paste0("../../02_gene-enrichment/output/", file_prefix, "_", contrast, ".png"), 
+      plot = kegg_gsea_plot, 
+    width = 8, 
+    height = 7, 
+      dpi = 600
+    )
+  }
+}
+
+# Run the custom function to generate KEGG GSEA plots for predefined contrasts
+plot_predefined_kegg_gsea(kegg_gsea_split = kegg_gsea_split, file_prefix = "KEGG_GSEA_enrichment")
+```
+

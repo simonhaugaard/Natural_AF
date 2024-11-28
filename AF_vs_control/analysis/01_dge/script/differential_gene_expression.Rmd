@@ -155,7 +155,7 @@ CPM <- cpm(y)
 logCPM <- cpm(y, log = TRUE)
 
 # Save the logCPM matrix to a CSV file
-write.csv(logCPM, "../output/Log2_TMM_normalized_CPM_values.csv", row.names = TRUE)
+# write.csv(logCPM, "../output/Log2_TMM_normalized_CPM_values.csv", row.names = TRUE)
 
 
 ```

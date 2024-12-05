@@ -28,7 +28,7 @@ DGE <- fread("../../01_dge/output/dge_results.tsv.gz")
 
 # Read the specific sheet "Atrial_Specific" from the Excel file
 # Ensure correct path to the Excel file and specify the sheet name
-Atrial_specific <- read.xlsx("../../01_dge/output/Overlap_analysis/Detected_Genes_Intersections.xlsx", 
+Atrial_specific <- read.xlsx("../../01_dge/output/Overlap_analysis/Detected_Genes_Intersections_Bgee.xlsx", 
                              sheet = "Atrial_Specific")
 
 # Inspect the structure of the data for verification
@@ -50,7 +50,7 @@ sig_genes_RA <- unique(sig_genes_RA$GeneName)
 
 # Create a vector for atrial-specific genes from the loaded Excel file
 atrial_specific_genes <- unique(Atrial_specific$GeneName)
-setnames(Atrial_specific, old = c("Gene", "GENENAME"), new = c("ENSEMBL_ID", "GENENAME"))
+setnames(Atrial_specific, old = c("GeneID", "GENENAME"), new = c("ENSEMBL_ID", "GENENAME"))
 
 # Filter DGE for significantly differentially expressed genes in LA and RA using ENSEMBL IDs
 sig_genes_LA <- DGE[Contrast == "AF_vs_control_LA" & adj.P.Val < 0.05, .(ENSEMBL_ID = ENSEMBL)]
@@ -228,6 +228,24 @@ venn_plot <- ggvenn(
   )
 # Save the plot as a high-quality PNG file
 ggsave(filename = "../output/venn_diagram_ion_channels_no_labels_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+
+# Print names of overlaps 
+
+# Compute overlaps using intersect with character vectors
+overlap_LA_RA_genes <- intersect(sig_genes_LA, sig_genes_RA)
+overlap_LA_ion_genes <- intersect(sig_genes_LA, ion_channel_genes)
+overlap_RA_ion_genes <- intersect(sig_genes_RA, ion_channel_genes)
+
+# Print the number and names of overlapping genes
+cat("Number of overlapping genes:\n")
+cat("LA and RA Overlap (Count):", length(overlap_LA_RA_genes), "\n")
+cat("LA and RA Overlap (Gene Names):", paste(overlap_LA_RA_genes, collapse = ", "), "\n\n")
+
+cat("LA and Ion Channel Overlap (Count):", length(overlap_LA_ion_genes), "\n")
+cat("LA and Ion Channel Overlap (Gene Names):", paste(overlap_LA_ion_genes, collapse = ", "), "\n\n")
+
+cat("RA and Ion Channel Overlap (Count):", length(overlap_RA_ion_genes), "\n")
+cat("RA and Ion Channel Overlap (Gene Names):", paste(overlap_RA_ion_genes, collapse = ", "), "\n\n")
 
 ```
 

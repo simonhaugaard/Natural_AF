@@ -18,9 +18,10 @@ knitr::opts_chunk$set(echo = TRUE)
 # Required R libraries
 ```{r library}
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load("edgeR", "readr", "readxl", "biomaRt", "magrittr", "tibble", "stringr", 
-               "ggplot2", "data.table", "patchwork", "openxlsx", "aamisc", "limma", 
-               "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset")
+pacman::p_load(
+  "edgeR", "readr", "readxl", "biomaRt", "magrittr", "tibble", "stringr", 
+  "ggplot2", "data.table", "patchwork", "openxlsx", "aamisc", "limma", 
+  "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset", "BgeeCall", "tidyr")
 
 # install aamisc package for MDS and Volcano plots if not already done
 # Uncomment if needed to install the aamisc package
@@ -738,246 +739,103 @@ print(volcano_plots_with_labels[["AF_vs_control_RA"]])
 
 ```
 
+# Region Specific Genes (From Bgee Pibeline)
+```{r Region_Specific}
+# Step 1: Read data based on bgee-call workflow performed on uCloud directly on raw-libraries
+bgee <- fread("../../../data/count/merged_calls_bgee.tsv")
+bgee <- bgee %>%
+    rename(GeneID = V1)
 
-<!-- # Atrial Selectivty based on count -->
-<!-- ```{r, Overlap, fig.height=5, fig.width=5} -->
-<!-- #  Filter metadata to include only healthy (Control) horses -->
-<!-- healthy_meta <- meta %>% filter(Group == "Control") -->
-
-<!-- #  Subset the filtered count matrix (y$counts) to include only columns (samples) from healthy horses -->
-<!-- healthy_samples <- rownames(healthy_meta) -->
-<!-- healthy_filtered_counts <- y$counts[, healthy_samples, drop = FALSE] -->
-
-<!-- # Set the minimum count threshold for detection and the percentage of samples in a region to consider a gene detected -->
-<!-- count_threshold <- 5  # Minimum count to consider a gene detected -->
-<!-- detection_percentage <- 0.75  # Minimum percentage of samples in a region for detection -->
-
-<!--   # TODO check with Ali if these thresholds are relevant  -->
-
-<!-- #  Filter count data for detected genes in each region using the threshold and detection percentage -->
-<!-- detected_genes_list <- list() -->
-
-<!-- for (region in regions) { -->
-<!--   region_samples <- rownames(healthy_meta[healthy_meta$Region == region, ]) -->
-<!--   region_filtered_counts <- healthy_filtered_counts[, region_samples, drop = FALSE] -->
-
-<!--   # Identify genes with counts greater than or equal to the threshold in at least 'detection_percentage' of samples -->
-<!--   detected_genes <- rownames(region_filtered_counts[ -->
-<!--     rowMeans(region_filtered_counts >= count_threshold) >= detection_percentage,  -->
-<!--   ]) -->
-
-<!--   # Debug: Display number of detected genes in each region -->
-<!--   cat("Number of detected genes in", region, ":", length(detected_genes), "\n") -->
-
-<!--   detected_genes_list[[region]] <- detected_genes -->
-<!-- } -->
-
-<!-- # Create a binary matrix for gene presence/absence in each region based on the detection criteria -->
-<!-- all_detected_genes <- unique(unlist(detected_genes_list)) -->
-
-<!-- # Create a binary matrix with rows as genes and columns as regions -->
-<!-- gene_presence_matrix <- data.frame( -->
-<!--   Gene = all_detected_genes, -->
-<!--   LA = as.numeric(all_detected_genes %in% detected_genes_list[["LA"]]), -->
-<!--   RA = as.numeric(all_detected_genes %in% detected_genes_list[["RA"]]), -->
-<!--   LV = as.numeric(all_detected_genes %in% detected_genes_list[["LV"]]), -->
-<!--   RV = as.numeric(all_detected_genes %in% detected_genes_list[["RV"]]) -->
-<!-- ) -->
-
-<!-- # Create the UpSet plot using ComplexUpset -->
-<!-- upset_data <- gene_presence_matrix %>% -->
-<!--   mutate(across(-Gene, as.logical))  # Convert columns to logical values -->
-<!-- # Define set names for easy reference -->
-<!-- set_names <- c("LA", "RA", "LV", "RV") -->
-
-<!-- # Create the UpSet plot to show overlap of detected genes across regions -->
-<!-- upset_plot <- ComplexUpset::upset( -->
-<!--   upset_data, set_names,  -->
-<!--   name = "Region", -->
-<!--   intersections = list( -->
-<!--     c("LA"), c("RA"), c("LV"), c("RV"),  # Individual sets -->
-<!--     c("LA", "RA"), c("LV", "RV"),         # Atrial and ventricular combinations -->
-<!--     c("LA", "LV"), c("RA", "RV"),         # Left and right side combinations -->
-<!--     c("LA", "RA", "LV", "RV"),             # Genes present in all four regions -->
-<!--     c("LA", "RV"), c("RA","LV")          # Genes "asymmetrically" present in right/left atria/ventricle -->
-<!--   ), -->
-<!--   min_size = 10,  # Minimum size of intersections to be displayed -->
-<!--   width_ratio = 0.2, height_ratio = 0.4,  # Adjust ratios for better visualization -->
-<!--   themes = upset_default_themes(panel.grid.major = element_blank()) -->
-<!-- ) -->
-
-<!-- # Add annotations and customize the plot -->
-<!-- upset_plot <- upset_plot +  -->
-<!--   ggtitle("Overlap of Robustly Detected Genes in Healthy Horse Heart Regions") +  -->
-<!--   theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) -->
-
-<!-- # Display ans save the plot -->
-<!-- print(upset_plot) -->
-<!-- ggsave(filename = "../output/Detected_Genes_Intersections_UpSet.png",  # Specify file path and name -->
-<!--   plot = upset_plot,                                              # Use the created upset_plot object -->
-<!--   width = 6, height = 4,                                         # Set desired width and height in inches -->
-<!--   dpi = 600                                                       # Set the resolution (DPI) for high quality -->
-<!-- ) -->
+# Step 2: Filter metadata for healthy samples
+meta_reordered <- meta_reordered %>%
+  filter(Group == "Control")  # Only healthy samples
+meta_reordered <- meta_reordered %>%
+  mutate(Sample = rownames(meta_reordered))  # Add a 'Sample' column for mapping
 
 
-<!-- ###### EXPORT ######### -->
-<!-- #  Map ENSEMBL IDs to Gene Names -->
-<!-- upset_data_annot <- merge(upset_data, annot_reordered[, c("ENSEMBL", "GENENAME")],  -->
-<!--                           by.x = "Gene", by.y = "ENSEMBL", all.x = TRUE) -->
+# Step 3: Subset bgee to include only healthy samples
+healthy_samples <- rownames(meta_reordered)  # Row names in meta_reordered are the sample names
+healthy_columns <- c("GeneID", healthy_samples)  # Keep GeneID and healthy sample columns
+bgee_healthy <- bgee %>%
+  select(all_of(healthy_columns))  # Subset bgee using healthy sample columns
 
-<!-- # Replace NA values in `GENENAME` with ENSEMBL IDs to ensure every gene has a name -->
-<!-- upset_data_annot$GENENAME[is.na(upset_data_annot$GENENAME)] <- upset_data_annot$Gene[is.na(upset_data_annot$GENENAME)] -->
+# Step 4: Reshape bgee_healthy into long format and map regions
+bgee_long <- bgee_healthy %>%
+  pivot_longer(-GeneID, names_to = "Sample", values_to = "Presence") %>%
+  left_join(meta_reordered %>% select(Sample, Region), by = "Sample") %>%  # Map regions
+  mutate(Presence = as.numeric(Presence == "present"))  # Convert "present"/"absent" to binary
 
-<!-- # Create a named list to store gene lists for each intersection -->
-<!-- gene_lists <- list() -->
+# Step 5: Calculate the percentage of "present" samples per region
+bgee_summary <- bgee_long %>%
+  group_by(GeneID, Region) %>%
+  summarize(PercentPresent = mean(Presence), .groups = "drop")  # Proportion of "present" samples per region
 
-<!-- #  Define and extract genes for each intersection of interest -->
-<!-- intersections <- list( -->
-<!--   "LA_Only" = list(include = c("LA"), exclude = c("RA", "LV", "RV")), -->
-<!--   "RA_Only" = list(include = c("RA"), exclude = c("LA", "LV", "RV")), -->
-<!--   "LV_Only" = list(include = c("LV"), exclude = c("LA", "RA", "RV")), -->
-<!--   "RV_Only" = list(include = c("RV"), exclude = c("LA", "RA", "LV")), -->
-<!--   "Atrial_Specific" = list(include = c("LA", "RA"), exclude = c("LV", "RV")), -->
-<!--   "Ventricular_Specific" = list(include = c("LV", "RV"), exclude = c("LA", "RA")), -->
-<!--   "Left_Side_Specific" = list(include = c("LA", "LV"), exclude = c("RA", "RV")), -->
-<!--   "Right_Side_Specific" = list(include = c("RA", "RV"), exclude = c("LA", "LV")), -->
-<!--   "All_Four_Regions" = list(include = c("LA", "RA", "LV", "RV"), exclude = c()), -->
-<!--   "LA_RV" = list(include = c("LA", "RV"), exclude = c("RA", "LV")), -->
-<!--   "RA_LV" = list(include = c("RA", "LV"), exclude = c("LA", "RV")) -->
-<!-- ) -->
+# Step 6: Apply the 75% threshold for detection in a region
+detection_threshold <- 0.75
+binary_matrix <- bgee_summary %>%
+  mutate(IsPresent = PercentPresent >= detection_threshold) %>%  # Binary presence/absence
+  pivot_wider(names_from = Region, values_from = IsPresent, values_fill = FALSE) %>%  # Create binary matrix
+  filter(rowSums(select(., -GeneID)) > 0) %>%  # Retain rows where at least one region is TRUE
+  distinct(GeneID, .keep_all = TRUE) %>%  # Remove duplicates
+  mutate(across(-GeneID, as.numeric))  # Convert logical values to numeric
+binary_matrix <- binary_matrix %>%
+  select(-PercentPresent)  # Remove the PercentPresent column
 
-<!-- # Extract genes for each intersection -->
-<!-- for (name in names(intersections)) { -->
-<!--   include_regions <- intersections[[name]]$include -->
-<!--   exclude_regions <- intersections[[name]]$exclude -->
 
-<!--   # Identify genes present in the included regions and absent in the excluded regions -->
-<!--   genes_in_intersection <- upset_data_annot %>% -->
-<!--     filter(across(all_of(include_regions), ~ . == TRUE)) %>%   # Genes present in included regions -->
-<!--     filter(across(all_of(exclude_regions), ~ . == FALSE)) %>%  # Genes absent in excluded regions -->
-<!--     select(Gene, GENENAME)  # Select only ENSEMBL ID and gene name columns -->
+# Step 7: Annotate binary_matrix
+annot_reordered <- annot_reordered %>%
+  distinct(ENSEMBL, .keep_all = TRUE)  # Keep only unique rows by ENSEMBL
 
-<!--   # Store the resulting gene list in the `gene_lists` list -->
-<!--   gene_lists[[name]] <- genes_in_intersection -->
-<!-- } -->
+binary_matrix_annot <- binary_matrix %>%
+  left_join(annot_reordered[, c("ENSEMBL", "GENENAME")], by = c("GeneID" = "ENSEMBL")) %>%
+  mutate(GENENAME = if_else(is.na(GENENAME), GeneID, GENENAME)) %>%
+  distinct(GeneID, .keep_all = TRUE)  # Ensure no duplicates after annotation
 
-<!-- #  Write each gene list to a separate sheet in an Excel file -->
-<!-- output_file <- "../output/Detected_Genes_Intersections.xlsx" -->
-<!-- wb <- createWorkbook() -->
+# Step 8: Update binary matrix for strict inclusion and exclusion
+binary_matrix_strict <- binary_matrix_annot %>%
+  mutate(
+    Atrial_Specific = if_all(all_of(c("LA", "RA")), ~ . == 1) & if_all(all_of(c("LV", "RV")), ~ . == 0),
+    Ventricular_Specific = if_all(all_of(c("LV", "RV")), ~ . == 1) & if_all(all_of(c("LA", "RA")), ~ . == 0),
+    LA_Only = (LA == 1) & if_all(all_of(c("RA", "LV", "RV")), ~ . == 0),
+    RA_Only = (RA == 1) & if_all(all_of(c("LA", "LV", "RV")), ~ . == 0),
+    LV_Only = (LV == 1) & if_all(all_of(c("LA", "RA", "RV")), ~ . == 0),
+    RV_Only = (RV == 1) & if_all(all_of(c("LA", "RA", "LV")), ~ . == 0),
+    Left_Side_Specific = if_all(all_of(c("LA", "LV")), ~ . == 1) & if_all(all_of(c("RA", "RV")), ~ . == 0),
+    Right_Side_Specific = if_all(all_of(c("RA", "RV")), ~ . == 1) & if_all(all_of(c("LA", "LV")), ~ . == 0),
+    All_Four_Regions = if_all(all_of(c("LA", "RA", "LV", "RV")), ~ . == 1)
+  ) %>%
+  select(GeneID, Atrial_Specific, Ventricular_Specific, LA_Only, RA_Only, LV_Only, RV_Only, Left_Side_Specific, Right_Side_Specific, All_Four_Regions) %>%
+  filter(rowSums(select(., -GeneID)) > 0)  # Retain genes that meet criteria in at least one category
 
-<!-- for (sheet_name in names(gene_lists)) { -->
-<!--   addWorksheet(wb, sheet_name) -->
-<!--   writeData(wb, sheet = sheet_name, x = gene_lists[[sheet_name]]) -->
-<!-- } -->
-
-<!-- # Save the Excel file with all intersection lists -->
-<!-- saveWorkbook(wb, output_file, overwrite = TRUE) -->
-
-<!-- # Confirmation message -->
-<!-- cat("Intersection lists successfully saved to:", output_file, "\n") -->
-
-<!-- ``` -->
-
-# Atrial Selectivity based on RPKM
-```{r}
-# Calculate RPKM for all genes
-total_reads <- colSums(y$counts)  # Total reads per sample
-gene_lengths <- annot_reordered$Length  # Gene lengths in base pairs
-
-# Calculate RPKM: (Counts * 1e9) / (Gene Length * Total Reads)
-rpkm_matrix <- sweep(y$counts, 2, total_reads, "/") * 1e9
-rpkm_matrix <- sweep(rpkm_matrix, 1, gene_lengths, "/")
-
-# Filter metadata to include only healthy (Control) horses
-healthy_meta <- meta %>% filter(Group == "Control")
-
-# Subset the filtered RPKM matrix to include only columns (samples) from healthy horses
-healthy_samples <- rownames(healthy_meta)
-healthy_rpkm_matrix <- rpkm_matrix[, healthy_samples, drop = FALSE]
-
-# Set the minimum RPKM threshold for detection and the percentage of samples in a region to consider a gene detected
-rpkm_threshold <- 1  # Minimum RPKM to consider a gene detected
-detection_percentage <- 0.5  # Minimum percentage of samples in a region for detection
-
-# Filter RPKM data for detected genes in each region using the threshold and detection percentage
-detected_genes_list <- list()
-
-for (region in regions) {
-  region_samples <- rownames(healthy_meta[healthy_meta$Region == region, ])
-  region_filtered_rpkm <- healthy_rpkm_matrix[, region_samples, drop = FALSE]
-
-  # Identify genes with RPKM greater than or equal to the threshold in at least 'detection_percentage' of samples
-  detected_genes <- rownames(region_filtered_rpkm[
-    rowMeans(region_filtered_rpkm >= rpkm_threshold) >= detection_percentage, 
-  ])
-  
-  # Debug: Display number of detected genes in each region
-  cat("Number of detected genes in", region, ":", length(detected_genes), "\n")
-
-  detected_genes_list[[region]] <- detected_genes
-}
-
-# Create a binary matrix for gene presence/absence in each region based on the detection criteria
-all_detected_genes <- unique(unlist(detected_genes_list))
-
-# Create a binary matrix with rows as genes and columns as regions
-gene_presence_matrix <- data.frame(
-  Gene = all_detected_genes,
-  LA = as.numeric(all_detected_genes %in% detected_genes_list[["LA"]]),
-  RA = as.numeric(all_detected_genes %in% detected_genes_list[["RA"]]),
-  LV = as.numeric(all_detected_genes %in% detected_genes_list[["LV"]]),
-  RV = as.numeric(all_detected_genes %in% detected_genes_list[["RV"]])
-)
-
-# Create the UpSet plot using ComplexUpset
-upset_data <- gene_presence_matrix %>%
-  mutate(across(-Gene, as.logical))  # Convert columns to logical values
-
-# Define set names for easy reference
-set_names <- c("LA", "RA", "LV", "RV")
-
-# Create the UpSet plot to show overlap of detected genes across regions
+# Generate the UpSet plot
 upset_plot <- ComplexUpset::upset(
-  upset_data, set_names, 
-  name = "Region",
-  intersections = list(
-    c("LA"), c("RA"), c("LV"), c("RV"),  # Individual sets
-    c("LA", "RA"), c("LV", "RV"),         # Atrial and ventricular combinations
-    c("LA", "LV"), c("RA", "RV"),         # Left and right side combinations
-    c("LA", "RA", "LV", "RV"),             # Genes present in all four regions
-    c("LA", "RV"), c("RA","LV")          # Genes "asymmetrically" present in right/left atria/ventricle
-  ),
-  min_size = 10,  # Minimum size of intersections to be displayed
-  width_ratio = 0.2, height_ratio = 0.4,  # Adjust ratios for better visualization
+  binary_matrix_strict,
+  colnames(binary_matrix_strict)[-1],  # Use the updated region-specific categories
+  name = "Region-Specific Genes",
+  intersections = "all",  # Show all intersections
+  min_size = 5,  # Minimum number of genes per intersection
+  width_ratio = 0.2,
+  height_ratio = 0.4,
   themes = upset_default_themes(panel.grid.major = element_blank())
 )
 
-# Add annotations and customize the plot
-upset_plot <- upset_plot + 
-  ggtitle("Overlap of Robustly Detected Genes in Healthy Horse Heart Regions") + 
+# Customize and display the plot
+upset_plot <- upset_plot +
+  ggtitle("Region-Specific Genes in Healthy Horse Hearts (Strict Logic)") +
   theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
-
-# Display and save the plot
 print(upset_plot)
+
+# Save the plot
 ggsave(
-  filename = "../output/Detected_Genes_Intersections_UpSet_RPKM.png",  # Specify file path and name
-  plot = upset_plot,                                              # Use the created upset_plot object
-  width = 6, height = 4,                                         # Set desired width and height in inches
-  dpi = 600                                                       # Set the resolution (DPI) for high quality
+  filename = "../output/Detected_Genes_Intersections_UpSet_BGEE.png",
+  plot = upset_plot,
+  width = 6, height = 4, dpi = 600
 )
 
-###### EXPORT #########
-# Map ENSEMBL IDs to Gene Names
-upset_data_annot <- merge(upset_data, annot_reordered[, c("ENSEMBL", "GENENAME")], 
-                          by.x = "Gene", by.y = "ENSEMBL", all.x = TRUE)
-
-# Replace NA values in `GENENAME` with ENSEMBL IDs to ensure every gene has a name
-upset_data_annot$GENENAME[is.na(upset_data_annot$GENENAME)] <- upset_data_annot$Gene[is.na(upset_data_annot$GENENAME)]
-
-# Create a named list to store gene lists for each intersection
+# Step 9: Extract genes for each intersection
 gene_lists <- list()
 
-# Define and extract genes for each intersection of interest
+# Define updated intersection logic
 intersections <- list(
   "LA_Only" = list(include = c("LA"), exclude = c("RA", "LV", "RV")),
   "RA_Only" = list(include = c("RA"), exclude = c("LA", "LV", "RV")),
@@ -987,28 +845,28 @@ intersections <- list(
   "Ventricular_Specific" = list(include = c("LV", "RV"), exclude = c("LA", "RA")),
   "Left_Side_Specific" = list(include = c("LA", "LV"), exclude = c("RA", "RV")),
   "Right_Side_Specific" = list(include = c("RA", "RV"), exclude = c("LA", "LV")),
-  "All_Four_Regions" = list(include = c("LA", "RA", "LV", "RV"), exclude = c()),
-  "LA_RV" = list(include = c("LA", "RV"), exclude = c("RA", "LV")),
-  "RA_LV" = list(include = c("RA", "LV"), exclude = c("LA", "RV"))
+  "All_Four_Regions" = list(include = c("LA", "RA", "LV", "RV"), exclude = c())
 )
 
 # Extract genes for each intersection
+gene_lists <- list()
+
 for (name in names(intersections)) {
   include_regions <- intersections[[name]]$include
   exclude_regions <- intersections[[name]]$exclude
   
-  # Identify genes present in the included regions and absent in the excluded regions
-  genes_in_intersection <- upset_data_annot %>%
-    filter(across(all_of(include_regions), ~ . == TRUE)) %>%   # Genes present in included regions
-    filter(across(all_of(exclude_regions), ~ . == FALSE)) %>%  # Genes absent in excluded regions
-    select(Gene, GENENAME)  # Select only ENSEMBL ID and gene name columns
+  # Enforce strict inclusion and exclusion criteria
+  genes_in_intersection <- binary_matrix_annot %>%
+    filter(if_all(all_of(include_regions), ~ . == 1)) %>%  # Present in all included regions
+    filter(if_all(all_of(exclude_regions), ~ . == 0)) %>%  # Absent in all excluded regions
+    select(GeneID, GENENAME)
   
-  # Store the resulting gene list in the `gene_lists` list
+  # Store the results
   gene_lists[[name]] <- genes_in_intersection
 }
 
-# Write each gene list to a separate sheet in an Excel file
-output_file <- "../output/Detected_Genes_Intersections_RPKM.xlsx"
+# Step 10: Save gene lists to Excel
+output_file <- "../output/Detected_Genes_Intersections_Bgee.xlsx"
 wb <- createWorkbook()
 
 for (sheet_name in names(gene_lists)) {
@@ -1016,14 +874,9 @@ for (sheet_name in names(gene_lists)) {
   writeData(wb, sheet = sheet_name, x = gene_lists[[sheet_name]])
 }
 
-# Save the Excel file with all intersection lists
 saveWorkbook(wb, output_file, overwrite = TRUE)
-
-# Confirmation message
 cat("Intersection lists successfully saved to:", output_file, "\n")
-
 ```
-
 
 # Session Info
 ```{r session_info}

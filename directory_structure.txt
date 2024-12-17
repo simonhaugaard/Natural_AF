@@ -1,0 +1,73 @@
+Folder PATH listing for volume Windows
+Volume serial number is 92E2-FE76
+C:.
+ÃÄÄÄAF_vs_control
+³   ÃÄÄÄanalysis
+³   ³   ÃÄÄÄ01_dge
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ³   ÃÄÄÄOverlap_analysis
+³   ³   ³   ³   ÃÄÄÄPCA_all
+³   ³   ³   ³   ÃÄÄÄPCA_healthy
+³   ³   ³   ³   ÀÄÄÄVolcano_plots
+³   ³   ³   ÀÄÄÄscript
+³   ³   ÃÄÄÄ02_gene-enrichment
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ÀÄÄÄscript
+³   ³   ³       ÀÄÄÄenrichment_files
+³   ³   ³           ÀÄÄÄfigure-html
+³   ³   ÃÄÄÄ03_ion-channel
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ÀÄÄÄscript
+³   ³   ÃÄÄÄ04_chord
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ÀÄÄÄscript
+³   ³   ÃÄÄÄ05_sankey
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ÀÄÄÄscript
+³   ³   ³       ÀÄÄÄSankey_diagrams_files
+³   ³   ³           ÀÄÄÄfigure-html
+³   ³   ÃÄÄÄ06_Venn_Diagrams & MitoXplorer
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ÀÄÄÄscript
+³   ³   ³       ÀÄÄÄVenn-Diagrams_files
+³   ³   ³           ÀÄÄÄfigure-html
+³   ³   ÃÄÄÄ07_proteomic-integration
+³   ³   ³   ÃÄÄÄoutput
+³   ³   ³   ÀÄÄÄscript
+³   ³   ÀÄÄÄ08_comparison_to_induced_model
+³   ³       ÃÄÄÄoutput
+³   ³       ÀÄÄÄscript
+³   ÃÄÄÄdata
+³   ³   ÃÄÄÄcount
+³   ³   ÃÄÄÄgene_annotation
+³   ³   ÃÄÄÄinduced_AF
+³   ³   ÃÄÄÄmetadata
+³   ³   ÀÄÄÄproteomics
+³   ÀÄÄÄpreprocessing
+ÀÄÄÄNatural_vs_induced_AF
+    ÃÄÄÄanalysis
+    ³   ÃÄÄÄ01_correlation
+    ³   ³   ÃÄÄÄoutput
+    ³   ³   ÀÄÄÄscript
+    ³   ³       ÀÄÄÄcorrelation_analysis_files
+    ³   ³           ÀÄÄÄfigure-html
+    ³   ÃÄÄÄ02_gene-enrichment
+    ³   ³   ÃÄÄÄoutput
+    ³   ³   ÀÄÄÄscript
+    ³   ³       ÀÄÄÄenrichment_files
+    ³   ³           ÀÄÄÄfigure-html
+    ³   ÃÄÄÄ03_chord
+    ³   ³   ÃÄÄÄoutput
+    ³   ³   ÀÄÄÄscript
+    ³   ÃÄÄÄ04_Venn-Diagrams
+    ³   ³   ÃÄÄÄoutput
+    ³   ³   ÀÄÄÄScript
+    ³   ÀÄÄÄ05_Natural_Induced_logFC_Correlation
+    ³       ÃÄÄÄoutput
+    ³       ÀÄÄÄScript
+    ÃÄÄÄdata
+    ³   ÃÄÄÄcount
+    ³   ÃÄÄÄgene_annotation
+    ³   ÃÄÄÄinduced_AF
+    ³   ÀÄÄÄmetadata
+    ÀÄÄÄpreprocessing

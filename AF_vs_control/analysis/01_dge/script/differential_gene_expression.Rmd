@@ -1,6 +1,6 @@
 ---
 title: "Differential Gene Expression"
-author: "Simon Haugaard"
+author: "Simon Haugaard, Ali Altintas"
 date: "`r Sys.Date()`"
 output: 
   html_document:
@@ -18,31 +18,31 @@ knitr::opts_chunk$set(echo = TRUE)
 # Required R libraries
 ```{r library}
 if (!require("pacman")) install.packages("pacman")
+
+if (!require("aamisc")){
+  pacman::p_load("qvalue", "rain", "limma", "devtools")
+  url <- "https://cran.r-project.org/src/contrib/Archive/HarmonicRegression/HarmonicRegression_1.0.tar.gz"
+  pkgFile <- "HarmonicRegression_1.0.tar.gz"
+  download.file(url = url, destfile = pkgFile)
+  install.packages(pkgs=pkgFile, type="source", repos=NULL)
+  file.remove(pkgFile)
+}
+
 pacman::p_load(
   "edgeR", "readr", "readxl", "biomaRt", "magrittr", "tibble", "stringr", 
   "ggplot2", "data.table", "patchwork", "openxlsx", "aamisc", "limma", 
-  "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset", "BgeeCall", "tidyr")
-
-# install aamisc package for MDS and Volcano plots if not already done
-# Uncomment if needed to install the aamisc package
-#pacman::p_load("qvalue", "rain", "limma", "devtools")
-#url <- "https://cran.r-project.org/src/contrib/Archive/HarmonicRegression/HarmonicRegression_1.0.tar.gz"
-#pkgFile <- "HarmonicRegression_1.0.tar.gz"
-#download.file(url = url, destfile = pkgFile)
-#install.packages(pkgs=pkgFile, type="source", repos=NULL)
-#file.remove(pkgFile)
-#pacman::p_load_gh("altintasali/aamisc")
+  "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset", "tidyr")
 
 # Color scheme and shapes for figures
 RA_colors <- c("#003049", "#0073af")
 LA_colors <- c("#d62828", "#e77d7d")
 RV_colors <- c("#ff7f00", "#ffb266")
 LV_colors <- c("#fcbf49", "#fee2ad")
+
 # Shape 16 (circle) for Control and Shape 17 (triangle) for AF
 condition_shapes <- c("Control" = 16, "AF" = 17)
 chamber_colors <- c("RA" = "#003049", "LA" = "#d62828", "RV" = "#ff7f00", "LV" = "#fcbf49")
 chamber_fill_colors <- c("RA" = "#0073af", "LA" = "#e77d7d", "RV" = "#ffb266", "LV" = "#fee2ad")
-
 
 ```
 
@@ -97,11 +97,8 @@ head(count)
 
 
 ```
-
-
-# `edgeR` differential expression analysis for multilevel designs
+# Differential expression analysis for multilevel designs
 ## Read count matrix
-
 ```{r edgeR_read, warning=FALSE}
 # Remove version numbers from gene names if present (e.g., "Gene.1" -> "Gene").
 rownames(count) <- stringr::str_split_fixed(string = rownames(count), 
@@ -491,6 +488,9 @@ patchwork::wrap_plots(pca_plot_healthy, ncol = 2) + patchwork::plot_layout(guide
 
 #### Add Loadings
 ```{r PCA_with_loadings, fig.height=10, fig.width=10}
+# PCA loadings highlight the genes contributing most to principal components, 
+# helping identify key drivers of transcriptional variability; supplementing DGE results
+
 # Source the helper functions
 source("pca_helpers.R")
 
@@ -556,10 +556,9 @@ variance_explained_df <- data.frame(
 print(variance_explained_df)
 ```
 
+## Differential expression analysis 
 
-# Differential expression analysis 
-
-## Create contrast for multilevel design
+### Create contrast for multilevel design
 ```{r edgeR_contrast}
 # create contrasts to test
 colnames(design)
@@ -581,22 +580,9 @@ con <- makeContrasts(AF_vs_control_RA = RA_AF - RA_Control,
                      levels = design)
 con
 
-# Main effects
-con_disease <- makeContrasts(AF_vs_control_RA = RA_AF - RA_Control,
-                             AF_vs_control_LA = LA_AF - LA_Control,
-                             AF_vs_control_RV = RV_AF - RV_Control,
-                             AF_vs_control_LV = LV_AF - LV_Control,
-                             levels = design)
-
-con_region <- makeContrasts( RA_vs_LA_control = RA_Control - LA_Control,
-                            RA_vs_LA_AF = RA_AF - LA_AF,
-                            RV_vs_LV_control = RV_Control - LV_Control,
-                            RV_vs_LV_AF = RV_AF - LV_AF,
-                            levels = design)
-
 ```
 
-## Differential analysis
+### Differential analysis  - `voomLmFit`
 ```{r voomLmFit, fig.height=7, fig.width=7}
 # V is the result of my linear model fitted using voom transformation
 y_raw <- d[keep, ,keep.lib.sizes=FALSE]
@@ -625,9 +611,9 @@ data.table::fwrite(x = res_all, file = "../output/dge_results.tsv.gz", sep = "\t
 ```
 
 
-## Diagnostics for differential analysis
+### Diagnostics for differential analysis
 
-### p-value histograms
+#### p-value histograms
 ```{r pvalue_histograms, fig.height=10, fig.width=10}
 ggplot(res_all, aes(x = P.Value)) + 
   geom_histogram(fill = "lightgray",
@@ -740,7 +726,11 @@ print(volcano_plots_with_labels[["AF_vs_control_RA"]])
 ```
 
 # Region Specific Genes (From Bgee Pibeline)
+This script identifies genes detected specifically or exclusively in different heart regions (left/right atria and ventricles) using the Bgee pipeline prescense/absence call. 
 ```{r Region_Specific}
+# This analysis identifies genes detected specifically or exclusively in different heart regions
+# (left/right atria and ventricles) using the Bgee pipeline presence/absence calls.
+
 # Step 1: Read data based on bgee-call workflow performed on uCloud directly on raw-libraries
 bgee <- fread("../../../data/count/merged_calls_bgee.tsv")
 bgee <- bgee %>%

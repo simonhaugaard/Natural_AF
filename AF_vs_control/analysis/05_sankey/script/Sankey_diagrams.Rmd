@@ -1,0 +1,387 @@
+---
+title: "String Terminal"
+author: "Simon Haugaard"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required R libraries
+```{r library}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table, dplyr, tidyr, ggplot2, ggsankey, viridis, scales)
+
+```
+
+
+# Sankey Diagram of Key upregulated pathways in RA AF
+```{r, Sankey Diagram}
+# 1. Load GO ORA results
+go_file <- "../../02_gene-enrichment/output/GO_ora.tsv.gz"
+go_ora <- fread(go_file)  # Read in the GO ORA results
+
+# Define selected GO terms
+selected_go_terms <- c(
+  "mitochondrial inner membrane", 
+  "collagen-containing extracellular matrix", 
+  "glutamatergic synapse", 
+  "peroxisome", 
+  "mitochondrial fusion", 
+  "cilium"
+)
+
+# 2. Filter GO ORA data based on selected GO terms
+filtered_go_ora <- go_ora %>%
+  filter(Contrast == "AverageRegionEffect_AV_healthy" & Description %in% selected_go_terms)
+
+# 3. Extract relevant gene IDs and GO terms
+gene_list <- unique(unlist(strsplit(filtered_go_ora$geneID, "/")))  # Split gene lists to get unique genes
+go_terms <- filtered_go_ora$Description
+
+# 4. Load DGE (Differential Gene Expression) results to match log fold-change (logFC) data with gene IDs
+dge_file <- "../../01_dge/output/dge_results.tsv.gz"
+dge <- fread(dge_file)  # Read in DGE results
+
+# Filter DGE data for the specific contrast "AverageRegionEffect_AV_healthy"
+dge_filtered <- dge %>%
+  filter(Contrast == "AverageRegionEffect_AV_healthy")
+
+# 5. Extract logFC and match it with gene_list from GO ORA results
+logFC_data <- dge_filtered %>%
+  filter(ENSEMBL %in% gene_list) %>%
+  select(ENSEMBL, GENENAME, logFC) %>%
+  filter(GENENAME != "X" & GENENAME != "X1" & GENENAME != "" & !is.na(GENENAME))  # Remove invalid gene names
+
+# 6. Transform GO ORA data: convert ENSEMBL IDs to gene names in the "Genes" column
+
+# A. Select and rename relevant columns to match the structure of EC$david
+go_ora_transformed <- filtered_go_ora %>%
+  select(Category = Database, ID, Term = Description, Genes = geneID, adj_pval = p.adjust)
+
+# B. Split ENSEMBL IDs in the 'Genes' column into individual IDs and create the Genes_split column
+go_ora_transformed$Genes_split <- strsplit(go_ora_transformed$Genes, "/")
+
+# C. Create a lookup table from logFC_data to map ENSEMBL to GENENAME
+ensembl_to_genename <- setNames(logFC_data$GENENAME, logFC_data$ENSEMBL)
+
+# D. Map ENSEMBL IDs to gene names using the lookup table
+go_ora_transformed$Genes_converted <- lapply(go_ora_transformed$Genes_split, function(ensembl_list) {
+  gene_names <- ensembl_to_genename[ensembl_list]  # Replace ENSEMBL with gene names
+  gene_names[!is.na(gene_names)]  # Return valid gene names, discard NAs
+})
+
+# E. Collapse the list of gene names into a single string for each row
+go_ora_transformed$Genes <- sapply(go_ora_transformed$Genes_converted, paste, collapse = ", ")
+
+# F. Remove intermediate columns (Genes_split and Genes_converted)
+go_ora_transformed <- go_ora_transformed %>%
+  select(-Genes_split, -Genes_converted)
+
+# 7. Filter logFC data to match only the genes in the custom gene list
+custom_gene_list <- c(
+  "NDUFA3", "NDUFA12", "ATP5PB", "ATP5F1A", "SDHA", "SDHB", "LDHB",  # mitochondrial inner membrane
+  "ECM1", "FGF10", "LOXL1", "TNC", "COL16A1", "COL5A2", "COL1A2", "COL6A2", "TGFB3",  # collagen-containing extracellular matrix
+  "DNM1", "STX3", "EPHB2", "SEMA3F", "PLCB1", "PLCB4", "SYN3",  # glutamatergic synapse
+  "PEX6", "PEX7", "LONP2", "FIS1", "MFF",  # peroxisome
+  "FIS1", "MFF", "MFN1", "OPA1", "BAK1", "BAX",  # mitochondrial fusion
+  "NOTCH2", "SMO", "CLUAP1", "IFT81", "TUB", "TULP3"  # cilium
+)
+
+# Ensure `Genes_converted` is a list of valid gene names, then filter based on `custom_gene_list`
+go_ora_filtered <- go_ora_transformed %>%
+  mutate(Genes_converted = strsplit(Genes, ", ")) %>%  # Split genes back into list format for filtering
+  rowwise() %>%
+  mutate(Genes_converted = list(intersect(Genes_converted, custom_gene_list))) %>%  # Keep only custom genes
+  filter(length(Genes_converted) > 0)  # Remove rows with no matching genes
+
+# 8. Unnest the `Genes_converted` column into individual rows
+sankey_data <- go_ora_filtered %>%
+  unnest(cols = c(Genes_converted)) %>%  # Convert list column to individual rows
+  select(GO_Term = Term, Gene = Genes_converted)  # Rename columns for clarity
+
+# Print structure of sankey_data to verify columns
+print("Structure of sankey_data after unnesting:")
+print(str(sankey_data))
+print(head(sankey_data))
+
+# 9. Add `node_type` column to identify each node's type (GO_Term or Gene)
+sankey_data <- sankey_data %>%
+  mutate(node_type = ifelse(GO_Term %in% unique(GO_Term), "GO_Term", "Gene"))
+
+# 10. Transform data into the format required by `ggsankey`
+sankey_data_long <- sankey_data %>%
+  ggsankey::make_long(GO_Term, Gene)
+
+# Check structure of `sankey_data_long` to confirm it includes necessary columns
+print("Structure of sankey_data_long after make_long():")
+print(str(sankey_data_long))
+print(head(sankey_data_long))
+
+# 11. Create the Sankey diagram using `ggsankey`
+sankey_plot <- ggplot(sankey_data_long, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = node, label = node)) +
+  geom_sankey(flow.alpha = 0.6, node.color = "black") +  # Adjust transparency for better visibility
+  geom_sankey_label(size = 3, color = "white", fontface = "bold") +  # Label nodes with gene names and GO terms
+  theme_sankey(base_size = 16) +  # Adjust theme for a clean look
+  scale_fill_viridis_d() +  # Use a color scale for better visual distinction
+  labs(title = "Sankey Diagram of GO Term Associations", subtitle = "Aesthetic Sankey diagram using ggsankey", y = "GO Terms", x = "Gene Associations") +
+  theme_minimal() +
+    theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),  # Remove grid lines
+    axis.text = element_blank(),  # Remove axis text
+    axis.ticks = element_blank(),  # Remove axis ticks
+    panel.border = element_blank(),  # Remove border
+    plot.background = element_blank(),  # Remove background color
+    panel.background = element_blank()
+  )
+
+# 12. Save the Sankey plot
+ggsave(filename = "../output/GO_Sankey_Diagram_ggsankey.png", plot = sankey_plot, width = 14, height = 10, dpi = 300)
+
+# Display confirmation and plot
+cat("Sankey diagram successfully saved to: ../output/GO_Sankey_Diagram_ggsankey.png \n")
+print(sankey_plot)
+
+```
+
+# Sankey Diagram of Key upregulated pathways in RA AF
+```{r, Sankey Alternative Aesthetic}
+# 1. Load GO ORA results
+go_file <- "../../02_gene-enrichment/output/GO_ora.tsv.gz"
+go_ora <- fread(go_file)  # Read in the GO ORA results
+
+# Define selected GO terms
+selected_go_terms <- c(
+  "collagen fibril organization", 
+  "extracellular region", 
+  "scavenger receptor activity", 
+  "acyl-CoA metabolic process")
+
+# 2. Filter GO ORA data based on selected GO terms
+filtered_go_ora <- go_ora %>%
+  filter(Contrast == "AF_vs_control_RA" & Description %in% selected_go_terms)
+
+# 3. Extract relevant gene IDs and GO terms
+gene_list <- unique(unlist(strsplit(filtered_go_ora$geneID, "/")))  # Split gene lists to get unique genes
+go_terms <- filtered_go_ora$Description
+
+# 4. Load DGE (Differential Gene Expression) results to match log fold-change (logFC) data with gene IDs
+dge_file <- "../../01_dge/output/dge_results.tsv.gz"
+dge <- fread(dge_file)  # Read in DGE results
+
+# Filter DGE data for the specific contrast "AverageRegionEffect_AV_healthy"
+dge_filtered <- dge %>%
+  filter(Contrast == "AverageRegionEffect_AV_healthy")
+
+# 5. Extract logFC and match it with gene_list from GO ORA results
+logFC_data <- dge_filtered %>%
+  filter(ENSEMBL %in% gene_list) %>%
+  select(ENSEMBL, GENENAME, logFC) %>%
+  filter(GENENAME != "X" & GENENAME != "X1" & GENENAME != "" & !is.na(GENENAME))  # Remove invalid gene names
+
+# 6. Transform GO ORA data: convert ENSEMBL IDs to gene names in the "Genes" column
+
+# A. Select and rename relevant columns to match the structure of EC$david
+go_ora_transformed <- filtered_go_ora %>%
+  select(Category = Database, ID, Term = Description, Genes = geneID, adj_pval = p.adjust)
+
+# B. Split ENSEMBL IDs in the 'Genes' column into individual IDs and create the Genes_split column
+go_ora_transformed$Genes_split <- strsplit(go_ora_transformed$Genes, "/")
+
+# C. Create a lookup table from logFC_data to map ENSEMBL to GENENAME
+ensembl_to_genename <- setNames(logFC_data$GENENAME, logFC_data$ENSEMBL)
+
+# D. Map ENSEMBL IDs to gene names using the lookup table
+go_ora_transformed$Genes_converted <- lapply(go_ora_transformed$Genes_split, function(ensembl_list) {
+  gene_names <- ensembl_to_genename[ensembl_list]  # Replace ENSEMBL with gene names
+  gene_names[!is.na(gene_names)]  # Return valid gene names, discard NAs
+})
+
+# E. Collapse the list of gene names into a single string for each row
+go_ora_transformed$Genes <- sapply(go_ora_transformed$Genes_converted, paste, collapse = ", ")
+
+# F. Remove intermediate columns (Genes_split and Genes_converted)
+go_ora_transformed <- go_ora_transformed %>%
+  select(-Genes_split, -Genes_converted)
+
+# 7. Filter logFC data to match only the genes in the custom gene list
+custom_gene_list <- c( "LOXL3", "LOXL1", "COL1A1", "FKBP10", "COL8A1", "LAMA2", "FBN2", "ECM1", "NPPB", "CCL24", "IGFBPL1", "SSC5D", "CD5L", "LOXL3", "ACKR4", "GPAM", "ACOT6")
+
+# Ensure `Genes_converted` is a list of valid gene names, then filter based on `custom_gene_list`
+go_ora_filtered <- go_ora_transformed %>%
+  mutate(Genes_converted = strsplit(Genes, ", ")) %>%  # Split genes back into list format for filtering
+  rowwise() %>%
+  mutate(Genes_converted = list(intersect(Genes_converted, custom_gene_list))) %>%  # Keep only custom genes
+  filter(length(Genes_converted) > 0)  # Remove rows with no matching genes
+
+# 8. Unnest the `Genes_converted` column into individual rows
+sankey_data <- go_ora_filtered %>%
+  unnest(cols = c(Genes_converted)) %>%  # Convert list column to individual rows
+  select(GO_Term = Term, Gene = Genes_converted)  # Rename columns for clarity
+
+# Print structure of sankey_data to verify columns
+print("Structure of sankey_data after unnesting:")
+print(str(sankey_data))
+print(head(sankey_data))
+
+# 9. Add `node_type` column to identify each node's type (GO_Term or Gene)
+sankey_data <- sankey_data %>%
+  mutate(node_type = ifelse(GO_Term %in% unique(GO_Term), "GO_Term", "Gene"))
+
+# 10. Transform data into the format required by `ggsankey`
+sankey_data_long <- sankey_data %>%
+  ggsankey::make_long(GO_Term, Gene)
+
+# Check structure of `sankey_data_long` to confirm it includes necessary columns
+print("Structure of sankey_data_long after make_long():")
+print(str(sankey_data_long))
+print(head(sankey_data_long))
+
+# 11. Create the Sankey diagram using `ggsankey`
+sankey_plot <- ggplot(sankey_data_long, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = node, label = node)) +
+  geom_sankey(flow.alpha = 0.6, node.color = "black") +  # Adjust transparency for better visibility
+  geom_sankey_label(size = 3, color = "white", fontface = "bold") +  # Label nodes with gene names and GO terms
+  theme_sankey(base_size = 16) +  # Adjust theme for a clean look
+  scale_fill_viridis_d() +  # Use a color scale for better visual distinction
+  labs(title = "Sankey Diagram of GO Term Associations", subtitle = "Aesthetic Sankey diagram using ggsankey", y = "GO Terms", x = "Gene Associations") +
+  theme_minimal() +
+    theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),  # Remove grid lines
+    axis.text = element_blank(),  # Remove axis text
+    axis.ticks = element_blank(),  # Remove axis ticks
+    panel.border = element_blank(),  # Remove border
+    plot.background = element_blank(),  # Remove background color
+    panel.background = element_blank()
+  )
+
+# 12. Save the Sankey plot
+ggsave(filename = "../output/GO_Sankey_Diagram_ggsankey.png", plot = sankey_plot, width = 14, height = 10, dpi = 300)
+
+# Display confirmation and plot
+cat("Sankey diagram successfully saved to: ../output/GO_Sankey_Diagram_ggsankey.png \n")
+print(sankey_plot)
+
+# 11. Create the "No Labels" Sankey diagram
+sankey_plot_no_labels <- ggplot(sankey_data_long, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = node, label = node)) +
+  geom_sankey(flow.alpha = 0.6, node.color = NA, node.width = 0.3) +  # Plot Sankey without labels and adjust node width
+  scale_fill_viridis_d()  +  # Use a color scale for better visual distinction
+  labs(title = "Sankey Diagram (No Labels)", y = NULL, x = NULL) +  # Set title and remove axis labels
+  theme_minimal(base_size = 16) +
+  theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),  # Remove grid lines
+    axis.text = element_blank(),  # Remove axis text
+    axis.ticks = element_blank(),  # Remove axis ticks
+    panel.border = element_blank(),  # Remove border
+    plot.background = element_blank(),  # Remove background color
+    panel.background = element_blank()
+  )
+
+# 12. Save the "No Labels" Sankey plot
+ggsave(filename = "../output/GO_Sankey_Diagram_No_Labels.png", plot = sankey_plot_no_labels, width = 14, height = 10, dpi = 800)
+
+# Display confirmation and plot
+cat("Sankey diagram successfully saved to: ../output/GO_Sankey_Diagram_No_Labels.png \n")
+print(sankey_plot_no_labels)
+
+# Save the "No Labels" Sankey plot with appropriate size for a 1/6 panel on A4
+ggsave(filename = "../output/GO_Sankey_Diagram_No_Labels.png", plot = sankey_plot_no_labels, width = 8.26, height = 7.8, dpi =800)
+
+```
+
+# Remove yellow colour for Improved Visualization 
+```{r, Sankey Final Aesethetic}
+# Define a custom color palette for nodes
+library(scales)  # For brightness check
+node_count <- length(unique(sankey_data_long$node))
+viridis_colors <- viridis::viridis(node_count + 2)  # Generate extra to identify yellow
+custom_viridis <- viridis_colors[-which.max(col2rgb(viridis_colors)["red", ])]  # Remove yellow (max red)
+custom_colors <- custom_viridis[1:length(unique(sankey_data_long$node))]
+
+
+# Function to adjust text color dynamically based on brightness
+adjust_text_color <- function(hex_color) {
+  ifelse(mean(col2rgb(hex_color)) > 127, "black", "white")
+}
+
+# Add dynamic text color to sankey_data_long
+sankey_data_long <- sankey_data_long %>%
+  mutate(label_color = adjust_text_color(custom_colors[as.numeric(as.factor(node))]))
+
+# Enhanced Sankey Diagram with Better Aesthetics
+sankey_plot <- ggplot(sankey_data_long, 
+                      aes(x = x, next_x = next_x, node = node, 
+                          next_node = next_node, fill = node, label = node)) +
+  geom_sankey(flow.alpha = 0.6, node.color = "black", node.width = 0.3) +  # Add border to nodes
+  geom_sankey_label(aes(color = label_color), size = 3, fontface = "bold") +  # Label nodes dynamically
+  scale_fill_manual(values = custom_colors) +  # Apply custom colors to nodes
+  scale_color_identity() +  # Use label_color directly
+  theme_sankey(base_size = 16) +
+  labs(title = "Sankey Diagram of GO Term Associations",
+       subtitle = "Improved Contrast and Aesthetics",
+       y = NULL, x = NULL) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),  # Remove grid lines
+    axis.text = element_blank(),  # Remove axis text
+    axis.ticks = element_blank(),  # Remove axis ticks
+    panel.border = element_blank(),  # Remove border
+    plot.background = element_blank(),  # Remove background color
+    panel.background = element_blank()
+  )
+# Save the plot with improved aesthetics
+ggsave(filename = "../output/Improved_GO_Sankey_Diagram.png", 
+       plot = sankey_plot, width = 14, height = 10, dpi = 300)
+
+# Display confirmation and plot
+cat("Improved Sankey diagram saved to: ../output/Improved_GO_Sankey_Diagram.png \n")
+print(sankey_plot)
+
+# Sankey Diagram with Custom Viridis Palette (No Labels)
+sankey_plot_no_labels <- ggplot(sankey_data_long, 
+                                aes(x = x, next_x = next_x, node = node, 
+                                    next_node = next_node, fill = node)) +
+  geom_sankey(flow.alpha = 0.6, node.color = NA , node.width = 0.3) +  # Add node border for better visuals
+  scale_fill_manual(values = custom_colors) +  # Apply custom colors
+  theme_sankey(base_size = 16) +
+  labs(title = "Sankey Diagram of GO Term Associations (No Labels)",
+       subtitle = "Enhanced Aesthetics without Text Clutter",
+       y = NULL, x = NULL) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",  # Move legend to the bottom for a clean look
+    panel.grid = element_blank(),  # Remove grid lines
+    axis.text = element_blank(),  # Remove axis text
+    axis.ticks = element_blank(),  # Remove axis ticks
+    panel.border = element_blank(),  # Remove border
+    plot.background = element_blank(),  # Remove background color
+    panel.background = element_blank()
+  )
+
+# Save the plot without labels
+ggsave(filename = "../output/Improved_GO_Sankey_Diagram_No_Labels.png", 
+       plot = sankey_plot_no_labels, width = 14, height = 10, dpi = 300)
+
+# Display confirmation and plot
+cat("Improved Sankey diagram (no labels) saved to: ../output/Improved_GO_Sankey_Diagram_No_Labels.png \n")
+print(sankey_plot_no_labels)
+
+```
+
+
+# Session Info
+```{r session_info}
+sessionInfo()
+```
+

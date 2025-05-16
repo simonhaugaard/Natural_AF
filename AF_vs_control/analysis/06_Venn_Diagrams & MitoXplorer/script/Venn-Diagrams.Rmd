@@ -1,0 +1,577 @@
+---
+title: "Overlap Analyses & Mitoxplorer"
+author: "Simon Haugaard"
+date: "2024-06-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Library
+```{r, Libraries and Environment Setup}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  ggvenn, edgeR, readr, readxl, biomaRt, magrittr, tibble, stringr, 
+  ggplot2, data.table, patchwork, openxlsx, dplyr, missForest, RColorBrewer, viridis, tidyr, forcats
+)
+pacman::p_load_gh("altintasali/aamisc")
+```
+
+# Atrial specific DGEs 
+## Read files
+```{r,  Read and Prepare Data}
+# Read in differential gene expression (DGE) results
+# Ensure correct path to DGE results file
+DGE <- fread("../../01_dge/output/dge_results.tsv.gz")
+
+# Read the specific sheet "Atrial_Specific" from the Excel file
+# Ensure correct path to the Excel file and specify the sheet name
+Atrial_specific <- read.xlsx("../../01_dge/output/Overlap_analysis/Detected_Genes_Intersections_Bgee.xlsx", 
+                             sheet = "Atrial_Specific")
+
+# Inspect the structure of the data for verification
+head(DGE)
+head(Atrial_specific)
+
+```
+
+## Prepare Gene Lists for Venn Diagram
+```{r, Prepare Gene Lists for Venn Diagram}
+# Extract significant genes (adjusted P value < 0.05) for LA and RA contrasts
+# Extract significant genes from the DGE results for AF_vs_control in LA and RA
+sig_genes_LA <- DGE[Contrast == "AF_vs_control_LA" & adj.P.Val < 0.05, .(GeneName = GENENAME)]
+sig_genes_RA <- DGE[Contrast == "AF_vs_control_RA" & adj.P.Val < 0.05, .(GeneName = GENENAME)]
+
+# Create vectors of unique gene names for easier overlap comparison
+sig_genes_LA <- unique(sig_genes_LA$GeneName)
+sig_genes_RA <- unique(sig_genes_RA$GeneName)
+
+# Create a vector for atrial-specific genes from the loaded Excel file
+atrial_specific_genes <- unique(Atrial_specific$GeneName)
+setnames(Atrial_specific, old = c("GeneID", "GENENAME"), new = c("ENSEMBL_ID", "GENENAME"))
+
+# Filter DGE for significantly differentially expressed genes in LA and RA using ENSEMBL IDs
+sig_genes_LA <- DGE[Contrast == "AF_vs_control_LA" & adj.P.Val < 0.05, .(ENSEMBL_ID = ENSEMBL)]
+sig_genes_RA <- DGE[Contrast == "AF_vs_control_RA" & adj.P.Val < 0.05, .(ENSEMBL_ID = ENSEMBL)]
+
+# Create vectors of unique ENSEMBL IDs for overlap comparison
+sig_genes_LA <- unique(sig_genes_LA$ENSEMBL_ID)
+sig_genes_RA <- unique(sig_genes_RA$ENSEMBL_ID)
+
+# Create a vector of atrial-specific ENSEMBL IDs
+atrial_specific_ensembl <- unique(Atrial_specific$ENSEMBL_ID)
+
+# Create a list of gene sets (ENSEMBL IDs) for Venn diagram input
+gene_lists_ensembl <- list(
+  Sig_LA = sig_genes_LA,
+  Sig_RA = sig_genes_RA,
+  Atrial_Specific = atrial_specific_ensembl
+)
+```
+
+
+## Venn Diagram
+```{r, Atrial_Specific_Genes_Venn_Diagram}
+# Generate the Venn diagram with numbers
+venn_plot <- ggvenn(
+  gene_lists_ensembl,
+  fill_color = viridis(3),  # Using viridis color palette for the fills
+  stroke_color = "black",   # White stroke color for contrast
+  show_elements = FALSE,     # Show set labels and elements counts
+  text_size = 5,            # Increase text size for readability
+  set_name_size = 6         # Increase set name size for better visualization
+) + theme_void() +          # Clean background
+  theme(
+    legend.position = "none",  # Remove legend for cleaner plot
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.caption = element_text(size = 10)
+  ) +
+  ggtitle("Overlap of Differentially Expressed Genes in LA, RA, and Atrial-Specific Genes") +
+  labs(caption = "Generated using ggvenn and Viridis color palette")
+print(venn_plot)
+ggsave(filename = "../output/venn_diagram_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+
+
+# Generate a Venn diagram with only circles (no text labels or numbers)
+venn_plot <- ggvenn(
+  data = gene_lists_ensembl,
+  fill_color = viridis(3),  # Using viridis color palette for the fills
+  stroke_color = "black",   # White stroke color for contrast
+  show_elements = FALSE,    # Remove element counts and set labels
+  set_name_size = 0,        # Set name size to 0 to hide set labels
+  text_size = 0             # Set text size to 0 to hide element counts
+) + 
+  theme_void() +            # Clean background
+  theme(
+    plot.title = element_blank(),     # Remove title
+    plot.caption = element_blank(),   # Remove caption
+    plot.margin = margin(0, 0, 0, 0)  # Remove margins around the plot
+  )
+# Save the plot as a high-quality PNG file
+ggsave(filename = "../output/venn_diagram_no_labels_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+```
+
+
+## Print Overlaps
+```{r, Create Venn Diagrams}
+# Compute overlaps using ENSEMBL IDs
+overlap_LA_RA_ensembl <- intersect(sig_genes_LA, sig_genes_RA)
+overlap_LA_atrial_ensembl <- intersect(sig_genes_LA, atrial_specific_ensembl)
+overlap_RA_atrial_ensembl <- intersect(sig_genes_RA, atrial_specific_ensembl)
+common_overlap_ensembl <- Reduce(intersect, list(sig_genes_LA, sig_genes_RA, atrial_specific_ensembl))
+
+# Map ENSEMBL IDs back to gene names for display (join with atrial_specific data frame)
+setDT(Atrial_specific)
+overlap_LA_RA <- Atrial_specific[ENSEMBL_ID %in% overlap_LA_RA_ensembl, .(GENENAME)]
+overlap_LA_atrial <- Atrial_specific[ENSEMBL_ID %in% overlap_LA_atrial_ensembl, .(GENENAME)]
+overlap_RA_atrial <- Atrial_specific[ENSEMBL_ID %in% overlap_RA_atrial_ensembl, .(GENENAME)]
+common_overlap <- Atrial_specific[ENSEMBL_ID %in% common_overlap_ensembl, .(GENENAME)]
+
+# Create a named list of overlaps for easy printing and inspection (using gene names)
+overlap_list <- list(
+  LA_RA_Overlap = overlap_LA_RA$GENENAME,
+  LA_Atrial_Overlap = overlap_LA_atrial$GENENAME,
+  RA_Atrial_Overlap = overlap_RA_atrial$GENENAME,
+  Common_Overlap = common_overlap$GENENAME
+)
+
+# Print the overlaps in a comma-separated format with gene names for display purposes
+cat("LA and RA Overlap (Gene Names):", paste(overlap_list$LA_RA_Overlap, collapse = ", "), "\n")
+cat("LA and Atrial-Specific Overlap (Gene Names):", paste(overlap_list$LA_Atrial_Overlap, collapse = ", "), "\n")
+cat("RA and Atrial-Specific Overlap (Gene Names):", paste(overlap_list$RA_Atrial_Overlap, collapse = ", "), "\n")
+cat("Common Overlap (LA, RA, and Atrial-Specific - Gene Names):", paste(overlap_list$Common_Overlap, collapse = ", "), "\n")
+
+
+#VSNL1 has been identified as a AF-hub gene before (up in AF) https://journals.lww.com/md-journal/fulltext/2023/11100/identification_and_verification_of_atrial.8.aspx (up in horse AF)
+#GRM8 also up in patients with persistent AF (https://www.sciencedirect.com/science/article/pii/S1547527122023153) (down in horse AF)
+#ELOVL3 is a brown adipose tissue marker  (up in horse AF)
+
+```
+
+# Ionchannel differentially expressed
+```{r,  Read and Prepare data}
+# Read in differential gene expression (DGE) results
+# Ensure correct path to DGE results file
+DGE <- fread("../../01_dge/output/dge_results.tsv.gz")
+
+
+# Read the specific sheet "Atrial_Specific" from the Excel file
+# Ensure correct path to the Excel file and specify the sheet name
+Ion_channels <- read.xlsx("../../../data/gene_annotation/ion-channel-masterlist.xlsx")
+# Convert the Ion_channels data frame to a long format for easier processing
+ion_channel_genes <- Ion_channels %>%
+  pivot_longer(cols = everything(), names_to = "Channel_Type", values_to = "Gene") %>%
+  filter(!is.na(Gene)) %>%            # Remove NA values
+  pull(Gene)                          # Extract the Gene column as a vector
+
+sig_genes_LA <- DGE[Contrast == "AF_vs_control_LA" & adj.P.Val < 0.05, .(GENENAME)]
+sig_genes_RA <- DGE[Contrast == "AF_vs_control_RA" & adj.P.Val < 0.05, .(GENENAME)]
+
+# Ensure that sig_genes_LA and sig_genes_RA are character vectors
+sig_genes_LA <- sig_genes_LA$GENENAME  # Extract the GENENAME column as a vector
+sig_genes_RA <- sig_genes_RA$GENENAME  # Extract the GENENAME column as a vector
+
+# Now create the list for Venn diagram using character vectors
+gene_lists_genes <- list(
+  `LA Differential` = sig_genes_LA,
+  `RA Differential` = sig_genes_RA,
+  `Ion Channel Genes` = ion_channel_genes
+)
+
+# Compute overlaps using intersect with character vectors
+overlap_LA_RA_genes <- intersect(sig_genes_LA, sig_genes_RA)
+overlap_LA_ion_genes <- intersect(sig_genes_LA, ion_channel_genes)
+overlap_RA_ion_genes <- intersect(sig_genes_RA, ion_channel_genes)
+
+# Print the number of overlapping genes
+cat("Number of overlapping genes:\n")
+cat("LA and RA Overlap (Count):", length(overlap_LA_RA_genes), "\n")
+cat("LA and Ion Channel Overlap (Count):", length(overlap_LA_ion_genes), "\n")
+cat("RA and Ion Channel Overlap (Count):", length(overlap_RA_ion_genes), "\n")
+
+# Generate the Venn diagram with numbers
+venn_plot <- ggvenn(
+  gene_lists_genes,
+  fill_color = viridis(3),  # Using viridis color palette for the fills
+  stroke_color = "black",   # White stroke color for contrast
+  show_elements = FALSE,     # Show set labels and elements counts
+  text_size = 5,            # Increase text size for readability
+  set_name_size = 6         # Increase set name size for better visualization
+) + theme_void() +          # Clean background
+  theme(
+    legend.position = "none",  # Remove legend for cleaner plot
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.caption = element_text(size = 10)
+  ) +
+  ggtitle("Overlap of Differentially Expressed Genes in LA, RA, and Atrial-Specific Genes") +
+  labs(caption = "Generated using ggvenn and Viridis color palette")
+print(venn_plot)
+ggsave(filename = "../output/venn_diagram_ion_channels_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+
+
+# Generate a Venn diagram with only circles (no text labels or numbers)
+venn_plot <- ggvenn(
+  data = gene_lists_genes,
+  fill_color = viridis(3),  # Using viridis color palette for the fills
+  stroke_color = "black",   # White stroke color for contrast
+  show_elements = FALSE,    # Remove element counts and set labels
+  set_name_size = 0,        # Set name size to 0 to hide set labels
+  text_size = 0             # Set text size to 0 to hide element counts
+) + 
+  theme_void() +            # Clean background
+  theme(
+    plot.title = element_blank(),     # Remove title
+    plot.caption = element_blank(),   # Remove caption
+    plot.margin = margin(0, 0, 0, 0)  # Remove margins around the plot
+  )
+# Save the plot as a high-quality PNG file
+ggsave(filename = "../output/venn_diagram_ion_channels_no_labels_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+
+# Print names of overlaps 
+
+# Compute overlaps using intersect with character vectors
+overlap_LA_RA_genes <- intersect(sig_genes_LA, sig_genes_RA)
+overlap_LA_ion_genes <- intersect(sig_genes_LA, ion_channel_genes)
+overlap_RA_ion_genes <- intersect(sig_genes_RA, ion_channel_genes)
+
+# Print the number and names of overlapping genes
+cat("Number of overlapping genes:\n")
+cat("LA and RA Overlap (Count):", length(overlap_LA_RA_genes), "\n")
+cat("LA and RA Overlap (Gene Names):", paste(overlap_LA_RA_genes, collapse = ", "), "\n\n")
+
+cat("LA and Ion Channel Overlap (Count):", length(overlap_LA_ion_genes), "\n")
+cat("LA and Ion Channel Overlap (Gene Names):", paste(overlap_LA_ion_genes, collapse = ", "), "\n\n")
+
+cat("RA and Ion Channel Overlap (Count):", length(overlap_RA_ion_genes), "\n")
+cat("RA and Ion Channel Overlap (Gene Names):", paste(overlap_RA_ion_genes, collapse = ", "), "\n\n")
+
+```
+
+# Human GWAS Comparison
+```{r, Human_GWAS}
+# Read file based on publicaiton: https://www.thelancet.com/journals/lanepe/article/PIIS2666-7762(23)00204-1/fulltext
+gwas_hits_human <- c(
+  "ANP", "TBX5", "MYL4", "MYOZ1", "PLEC", "PITX2", "TTN", "GATA4", "MYH6", "NKX2-5", "CFL2", "MYH7", "PKP2", "RBM20", "SGCG", "SSPN", "ZFHX3", "KCCN3", "CEP68", 
+  "KCNN2", "SOX5", "SH3PXD2A", "METTL11B", "KLHL3", "WNT8A", "FAM13B", "ASAH1", "KCNJ5", 
+  "SCN", "CDK6", "EPHA3", "GOSR2", "UBE4B", "CASZ1", "CASQ2", "GJA5", "NUCKS1", "KIF3C", 
+  "XP01", "REEP1", "KDM3A", "WIPF1", "CHRNA", "SPATS2L", "LRIG1", "PHLDB2", "GNB4", "WDR1", 
+  "SLC9B1", "CAMK2D", "ARHGAP10", "ARHGAP26", "NR3C1", "ATXN1", "KDM1B", "CDKN1A", "UST", 
+  "DGKB", "CREB5", "GTF2I", "COG5", "KCNH2", "XP07", "FBX032", "PTK2", "SLC24A2", "MLLT3", 
+  "ZNF462", "PSMB7", "REEP3", "NAV2", "SSPN", "NACA", "BEST3", "KRR1", "PHLDA1", "TBX5-AS1", 
+  "TBX3", "DNAH10", "AKAP6", "SNX6", "LRRC74", "IRF2BPL", "USP3", "TLE3", "UACA", "IGF1R", 
+  "POLR2A", "TNFSF1", "MYOCD", "MAPT", "KCNJ2", "CASC17", "SMAD7", "CASC20", "BMP2", "PRRX1", 
+  "CAV1", "SYNE3", "FBP1", "FBP2", "HCN4", "SYNPO2L", "SCN10A", "TUBA8", "DTNA"
+)
+
+# Combine gene lists for the Venn diagram
+gene_lists_ensembl <- list(
+  "GWAS_Human" = gwas_hits_human,
+  "Sig_Genes_LA" = sig_genes_LA,
+  "Sig_Genes_RA" = sig_genes_RA
+)
+
+# Generate and customize the Venn diagram
+venn_plot <- ggvenn(
+  gene_lists_ensembl,
+  fill_color = viridis(3),
+  stroke_color = "black",
+  show_elements = FALSE,
+  text_size = 5,
+  set_name_size = 6
+) +
+  theme_void() +  # Clean background
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.caption = element_text(size = 10)
+  ) +
+  ggtitle("Overlap of Differentially Expressed Genes in LA, RA, and GWAS Hits") +
+  labs(caption = "Generated using ggvenn and Viridis color palette")
+
+# Display and save the Venn diagram
+print(venn_plot)
+ggsave(
+  filename = "../output/venn_diagram_GWAS_human_overlap.png",
+  plot = venn_plot,
+  device = "png",
+  dpi = 800,
+  width = 10,
+  height = 8,
+  units = "in"
+)
+
+# Identify and print overlaps
+overlap_LA <- intersect(gwas_hits_human, sig_genes_LA)
+overlap_RA <- intersect(gwas_hits_human, sig_genes_RA)
+overlap_both_atria <- intersect(overlap_LA, overlap_RA)
+
+# Output overlaps in comma-separated format
+cat("Overlapping LA Genes with GWAS Hits:", paste(overlap_LA, collapse = ", "), "\n")
+cat("Overlapping RA Genes with GWAS Hits:", paste(overlap_RA, collapse = ", "), "\n")
+cat("Overlapping LA and RA Genes with GWAS Hits:", paste(overlap_both_atria, collapse = ", "), "\n")
+
+```
+
+
+# MitoXplorer
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table, dplyr, readr)
+
+
+# Remove rows with missing GENENAME and ensure the GENENAME is not empty
+RA_data <- DGE[Contrast == "AF_vs_control_RA" & !is.na(GENENAME) & GENENAME != "", .(GENENAME, logFC, P.Value)]
+
+# Subset the data for LA (Left Atrium) using data.table syntax
+# Remove rows with missing GENENAME and ensure the GENENAME is not empty
+LA_data <- DGE[Contrast == "AF_vs_control_LA" & !is.na(GENENAME) & GENENAME != "", .(GENENAME, logFC, P.Value)]
+
+# ----------------------------------------------
+# Create Data Frames in the Required Format
+# ----------------------------------------------
+
+# Define the column names in the desired order
+col_names <- c("sampleID", "HGNC_symbol", "Control", "Mutant", "Log2FC", "pvalue", "", "", "")
+
+# Create RA CSV with required columns and column names
+RA_output <- RA_data %>%
+  .[, .(sampleID = "sample2",                       # Assign a constant sampleID
+        HGNC_symbol = GENENAME,                     # Rename GENENAME to HGNC_symbol
+        Control = NA,                               # Placeholder column for Control
+        Mutant = NA,                                # Placeholder column for Mutant
+        Log2FC = logFC,                             # Rename logFC to Log2FC
+        pvalue = P.Value,                           # Rename P.Value to pvalue
+        "", "", "")]                                # Empty columns to match the format
+
+# Assign the specified column names to the data frame
+setnames(RA_output, col_names)
+
+# Create LA CSV with required columns and column names
+LA_output <- LA_data %>%
+  .[, .(sampleID = "sample1",                       # Assign a constant sampleID
+        HGNC_symbol = GENENAME,                     # Rename GENENAME to HGNC_symbol
+        Control = NA,                               # Placeholder column for Control
+        Mutant = NA,                                # Placeholder column for Mutant
+        Log2FC = logFC,                             # Rename logFC to Log2FC
+        pvalue = P.Value,                           # Rename P.Value to pvalue
+        "", "", "")]                                # Empty columns to match the format
+
+# Assign the specified column names to the data frame
+setnames(LA_output, col_names)
+
+# ----------------------------------------------
+# Save to CSV Files
+# ----------------------------------------------
+
+# Save the RA output as a CSV file with the specified column names
+fwrite(RA_output, "../AF_vs_control_RA.csv", sep = ",")
+
+# Save the LA output as a CSV file with the specified column names
+fwrite(LA_output, "../AF_vs_control_LA.csv", sep = ",")
+
+# Print confirmation messages
+cat("Files successfully saved as 'AF_vs_control_RA.csv' and 'AF_vs_control_LA.csv'\n")
+
+#LA http://mitoxplorer.biochem.mpg.de/index.php?sessionid=8likgjsgdmr2n5s2cjgoq25m69
+#RA: http://mitoxplorer.biochem.mpg.de/index.php?sessionid=8likgjsgdmr2n5s2cjgoq25m69
+
+#Extract back from MitoXplorer with annotation
+```
+
+# Read and Clean the MitoXplorer Data
+```{r}
+# Step 1: Load the raw file as text
+raw_data <- readLines("../../../data/gene_annotation/Mito_Xplorer.txt")
+
+# Step 2: Split lines based on the delimiter "\t"
+split_data <- strsplit(raw_data, "\t")
+
+# Step 3: Check for rows with 6 or 7 fields and identify inconsistencies
+field_counts <- sapply(split_data, length)
+table(field_counts)  # Check how many rows have 6 vs 7 fields
+
+# Step 4: Remove the extra field from rows with 7 fields (i.e., the "Translation" category)
+# Create a function to drop the last field if the row has 7 fields
+adjusted_data <- lapply(split_data, function(row) {
+  if (length(row) == 7) {
+    return(row[1:6])  # Keep only the first 6 fields
+  } else {
+    return(row)
+  }
+})
+
+# Step 5: Convert adjusted list back into a data frame
+Mito_AF_vs_Control <- as.data.table(do.call(rbind, adjusted_data))
+
+# Step 6: Assign proper column names
+colnames(Mito_AF_vs_Control) <- c("Region", "GENE", "HGNC", "PROCESS", "LOG2FOLD", "P-VALUE")
+
+# Step 7: Check the final structure
+str(Mito_AF_vs_Control)
+
+# Step 8: Clean and process as needed (e.g., renaming and filtering)
+Mito_AF_vs_Control <- Mito_AF_vs_Control[, Region := ifelse(Region == "sample1_user", "LA", "RA")]
+Mito_AF_vs_Control <- Mito_AF_vs_Control[-1, ]
+```
+
+
+## Visualize the MitoXPlorer Data
+```{r, Read data}
+# Define significance threshold,  p-value < 0.05
+# Step 1: Convert `LOG2FOLD` and `P-VALUE` columns to numeric
+Mito_AF_vs_Control$LOG2FOLD <- as.numeric(Mito_AF_vs_Control$LOG2FOLD)
+Mito_AF_vs_Control$`P-VALUE` <- as.numeric(Mito_AF_vs_Control$`P-VALUE`)
+
+# Step 2: Remove rows with NA values in `LOG2FOLD` or `P-VALUE` after conversion
+Mito_AF_vs_Control <- Mito_AF_vs_Control[complete.cases(Mito_AF_vs_Control[, .(LOG2FOLD, `P-VALUE`)]), ]
+
+# Step 1: Filter and summarize the data by `PROCESS`, `Direction`, and `Region`
+significant_genes <- Mito_AF_vs_Control %>%
+  filter(`P-VALUE` < 0.05) %>%  # No logFC filter
+  mutate(Direction = ifelse(LOG2FOLD > 0, "Upregulated", "Downregulated")) %>%
+  group_by(PROCESS, Direction, Region) %>%
+  summarize(Count = n(), .groups = 'drop')
+```
+
+### Barplot
+```{r, Barplot}
+# Step 1: Convert `LOG2FOLD` and `P-VALUE` columns to numeric
+Mito_AF_vs_Control$LOG2FOLD <- as.numeric(Mito_AF_vs_Control$LOG2FOLD)
+Mito_AF_vs_Control$`P-VALUE` <- as.numeric(Mito_AF_vs_Control$`P-VALUE`)
+
+# Step 2: Remove rows with NA values in `LOG2FOLD` or `P-VALUE` after conversion
+Mito_AF_vs_Control <- Mito_AF_vs_Control[complete.cases(Mito_AF_vs_Control[, .(LOG2FOLD, `P-VALUE`)]), ]
+
+# Step 3: Filter and summarize the data by `PROCESS`, `Direction`, and `Region`
+significant_genes <- Mito_AF_vs_Control %>%
+  filter(`P-VALUE` < 0.05) %>%  # No logFC filter
+  mutate(Direction = ifelse(LOG2FOLD > 0, "Upregulated", "Downregulated")) %>%
+  group_by(PROCESS, Direction, Region) %>%
+  summarize(Count = n(), .groups = 'drop')
+
+# Function to create a customized bar plot for each region using viridis colors
+create_custom_barplot <- function(data, region_name, top_processes) {
+  data %>%
+    filter(Region == region_name & PROCESS %in% top_processes) %>%
+    mutate(
+      SignedCount = ifelse(Direction == "Upregulated", Count, -Count),  # Positive for upregulated, negative for downregulated
+      Transparency = ifelse(Direction == "Downregulated", 0.6, 1)  # Downregulated with lighter transparency
+    ) %>%
+    ggplot(aes(x = fct_reorder(PROCESS, abs(SignedCount)), y = SignedCount, fill = PROCESS)) +
+    geom_bar(stat = "identity", position = "identity", aes(alpha = Transparency), color = "black", linewidth = 0.4) +  # Thicker outline for distinction
+    coord_flip() +  # Flip for horizontal bars
+    scale_fill_viridis_d(option = "viridis", direction = 1) +  # Viridis color palette for fill
+    scale_alpha(range = c(0.6, 1)) +  # Vary transparency to indicate up- or downregulation
+    ylim(-10, NA) +  # Ensure y-axis starts from at least -5
+    theme_minimal(base_size = 16) +  # Use a minimal theme with increased base font size
+    theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      axis.title.x = element_text(size = 14, margin = margin(t = 15)),
+      axis.title.y = element_text(size = 14, margin = margin(r = 15)),
+      axis.text.y = element_text(face = "italic"),  # Italicize pathway names
+      axis.text.x = element_text(size = 12),
+      legend.position = "none",  # Hide legend to simplify the plot
+      panel.grid.major = element_line(linewidth = 0.5, linetype = 'dashed', color = "gray90"),  # Subtle grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      strip.text = element_text(face = "bold", size = 14, color = "black"),
+      strip.background = element_rect(fill = "gray95", color = "gray80", size = 1)  # Add background to facet strips for emphasis
+    ) +
+    labs(
+      title = paste("Top 10 Metabolic Processes in", region_name, "by Number of Significant Genes"),
+      x = "Metabolic Process",
+      y = "Number of Significant Genes (Left: Downregulated, Right: Upregulated)"
+    )
+}
+
+
+# Generate the top 10 processes for RA and LA separately
+top_10_RA <- significant_genes %>%
+  filter(Region == "RA") %>%
+  group_by(PROCESS) %>%
+  summarize(Total_Count = sum(Count), .groups = 'drop') %>%
+  top_n(10, Total_Count) %>%
+  pull(PROCESS)
+
+top_10_LA <- significant_genes %>%
+  filter(Region == "LA") %>%
+  group_by(PROCESS) %>%
+  summarize(Total_Count = sum(Count), .groups = 'drop') %>%
+  top_n(10, Total_Count) %>%
+  pull(PROCESS)
+
+# Create custom bar plots for RA and LA
+plot_RA <- create_custom_barplot(significant_genes, "RA", top_10_RA)
+plot_LA <- create_custom_barplot(significant_genes, "LA", top_10_LA)
+
+# Save the plots as high-quality PNG files
+ggsave(filename = "../output/RA_Top10_MitoPathways_Plot_Viridis.png", plot = plot_RA, device = "png", dpi = 1000, width = 10, height = 8, units = "in")
+ggsave(filename = "../output/LA_Top10_MitoPathways_Plot_Viridis.png", plot = plot_LA, device = "png", dpi = 1000, width = 10, height = 8, units = "in")
+
+# Display plots 
+print(plot_RA)
+print(plot_LA)
+```
+
+### Dotplot
+```{r, Dotplot}
+# Define custom colors for upregulated and downregulated genes
+upregulated_inner <- "#7C1516"   # Inner color for upregulated proteins (red)
+downregulated_inner <- "#285291" # Inner color for downregulated proteins (blue)
+nonsig_inner <- "grey"           # Inner color for non-significant proteins (grey)
+
+upregulated_rim <- "#4E0F10"     # Darker rim for upregulated proteins (darker red)
+downregulated_rim <- "#1E3B70"   # Darker rim for downregulated proteins (darker blue)
+nonsig_rim <- "darkgrey"         # Darker rim for non-significant proteins (dark grey)
+# Function to create a dot plot for each region
+create_dot_plot <- function(data, region_name, top_processes) {
+  data %>%
+    filter(Region == region_name & PROCESS %in% top_processes) %>%
+    mutate(SignedCount = ifelse(Direction == "Upregulated", Count, -Count)) %>%
+    ggplot(aes(x = fct_reorder(PROCESS, abs(SignedCount)), y = SignedCount, size = abs(SignedCount), color = Direction)) +
+    geom_point(alpha = 0.8) +  # Use points instead of bars
+    coord_flip() +  # Flip for horizontal alignment
+    scale_color_manual(values = c("Upregulated" = upregulated_inner, "Downregulated" = downregulated_inner)) +  # Use defined colors
+    scale_size(range = c(3, 10)) +  # Adjust point size range
+    theme_minimal(base_size = 16) +  # Use a minimal theme with increased base font size
+    theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      axis.title.x = element_text(size = 14, margin = margin(t = 15)),
+      axis.title.y = element_text(size = 14, margin = margin(r = 15)),
+      axis.text.y = element_text(face = "italic"),  # Italicize pathway names
+      axis.text.x = element_text(size = 12),
+      legend.position = "top",  # Position legend at the top
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12),
+      panel.grid.major = element_line(linewidth = 0.5, linetype = 'dashed', color = "gray90"),  # Subtle grid lines
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      strip.text = element_text(face = "bold", size = 14, color = "black"),
+      strip.background = element_rect(fill = "gray95", color = "gray80", size = 1)  # Add background to facet strips for emphasis
+    ) +
+    labs(
+      title = paste("Top 10 Metabolic Processes in", region_name, "by Number of Significant Genes"),
+      x = "Metabolic Process",
+      y = "Number of Significant Genes (Left: Downregulated, Right: Upregulated)",
+      color = "Regulation",
+      size = "Number of Genes"
+    )
+}
+
+# Create dot plots for RA and LA
+plot_RA_dot <- create_dot_plot(significant_genes, "RA", top_10_RA)
+plot_LA_dot <- create_dot_plot(significant_genes, "LA", top_10_LA)
+
+# Display dot plots
+print(plot_RA_dot)
+print(plot_LA_dot)
+
+```
+
+
+# Session Info
+```{r session_info}
+sessionInfo()
+```
+
+

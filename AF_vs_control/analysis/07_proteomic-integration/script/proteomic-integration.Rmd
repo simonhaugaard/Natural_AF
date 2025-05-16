@@ -1,0 +1,325 @@
+---
+title: "RNA/Protein Overlap"
+author: "Simon Haugaard"
+date: "2024-06-24"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Library
+```{r, Libraries and Environment Setup}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  ggvenn, edgeR, readr, readxl, biomaRt, magrittr, tibble, stringr, 
+  ggplot2, data.table, patchwork, openxlsx, dplyr, missForest, RColorBrewer, viridis, tidyr, forcats, ggpubr, ggrepel)
+```
+
+# Load data
+```{r,  Read and Prepare Data}
+# Read differentially expresed genes 
+DEGs <- fread("../../01_dge/output/dge_results.tsv.gz")
+DEGs_LA <- DEGs[Contrast == "AF_vs_control_LA" & adj.P.Val < 0.05, .(GENENAME, logFC)]
+DEGs_RA <- DEGs[Contrast == "AF_vs_control_RA" & adj.P.Val < 0.05, .(GENENAME, logFC)]
+DEGs_LV <- DEGs[Contrast == "AF_vs_control_LV" & adj.P.Val < 0.05, .(GENENAME, logFC)]
+
+# Read differentially expressed proteins from previous study
+DEPs_LA <- read_excel("../../../data/proteomics/horse_proteomic_data.xlsx", sheet = 1)
+DEPs_RA <- read_excel("../../../data/proteomics/horse_proteomic_data.xlsx", sheet = 2)
+DEPs_LV <- read_excel("../../../data/proteomics/horse_proteomic_data.xlsx", sheet = 3)
+
+str(DEGs_LA)
+str(DEPs_LA)
+
+# Define custom colors for upregulated and downregulated genes
+upregulated_inner <- "#7C1516"   # Inner color for upregulated proteins (red)
+downregulated_inner <- "#285291" # Inner color for downregulated proteins (blue)
+nonsig_inner <- "grey"           # Inner color for non-significant proteins (grey)
+
+upregulated_rim <- "#4E0F10"     # Darker rim for upregulated proteins (darker red)
+downregulated_rim <- "#1E3B70"   # Darker rim for downregulated proteins (darker blue)
+nonsig_rim <- "darkgrey"         # Darker rim for non-significant proteins (dark grey)
+
+```
+# Plot Correlation
+```{r, Corrrelation Plots}
+# Define a function to create scatter plots for RNA vs. Protein correlation and save two versions
+create_scatter_plot <- function(DEGs, DEPs, region_name, output_dir) {
+  
+  # Step 1: Merge DEGs and DEPs for the specified region based on gene names
+  merged_data <<- merge(DEGs, DEPs, by.x = "GENENAME", by.y = "Genename", all = FALSE)
+  
+  # Step 2: Rename columns for clarity after merging
+  colnames(merged_data) <- c("GENENAME", "logFC_RNA", "logFC_Protein")
+
+  # Step 3: Categorize points based on logFC relationship between RNA and Proteomics
+  merged_data <- merged_data %>%
+    mutate(
+      Category = case_when(
+        logFC_RNA > 0 & logFC_Protein > 0 ~ "Positive",
+        logFC_RNA < 0 & logFC_Protein < 0 ~ "Negative",
+        TRUE ~ "Opposite"
+      )
+    )
+# Step 3.1: Calculate the number of gene/protein pairs for each category
+upregulated_genes <- merged_data[Category == "Positive", .(GENENAME)]
+downregulated_genes <- merged_data[Category == "Negative", .(GENENAME)]
+opposite_genes <- merged_data[Category == "Opposite", .(GENENAME)]
+
+
+# Print the counts and list of genes/proteins
+cat("Total number of gene/protein pairs detected:", nrow(merged_data), "\n")
+cat("Number of upregulated pairs (RNA and Protein both up):", nrow(upregulated_genes), "\n")
+cat("Genes in upregulated category:", paste(upregulated_genes$GENENAME, collapse = ", "), "\n\n")
+
+cat("Number of downregulated pairs (RNA and Protein both down):", nrow(downregulated_genes), "\n")
+cat("Genes in downregulated category:", paste(downregulated_genes$GENENAME, collapse = ", "), "\n\n")
+
+cat("Number of opposite direction pairs (RNA and Protein opposite directions):", nrow(opposite_genes), "\n")
+cat("Genes in opposite direction category:", paste(opposite_genes$GENENAME, collapse = ", "), "\n\n")
+  # Step 4: Calculate correlation statistics
+  correlation_result <- cor.test(merged_data$logFC_RNA, merged_data$logFC_Protein, method = "pearson")
+  R_squared <- correlation_result$estimate^2  # Calculate R²
+  
+  # Print out R² and p-value with explanation
+  cat("\n", region_name, " Region:\n")
+  cat("Correlation Analysis:\n")
+  cat("Pearson correlation coefficient (r): ", round(correlation_result$estimate, 3), "\n")
+  cat("Coefficient of determination (R²): ", round(R_squared, 3), "\n")
+  cat("p-value: ", correlation_result$p.value, "\n")
+  cat("The above results were obtained using Pearson's correlation test, which measures the linear relationship between RNA-seq and proteomic log2 fold changes for the ", region_name, " region.\n\n")
+
+  # Step 5: Create scatter plot with labels
+  plot_labeled <- ggplot(merged_data, aes(x = logFC_RNA, y = logFC_Protein)) +
+    geom_point(
+      aes(
+        fill = Category,
+        color = Category
+      ),
+      size = 4, shape = 21, stroke = 1.2  # Use shape = 21 to allow separate fill and color; stroke controls rim thickness
+    ) +
+    geom_smooth(method = "lm", formula = 'y ~ x', color = "black", linetype = "solid", se = FALSE) +  # Add linear fit line
+    geom_text_repel(
+    aes(label = GENENAME), size = 12 / .pt,  # Set font size to 11 (size is in pts, so we divide by .pt to scale)
+    family = "Microsoft Tai Le",  # Set font family to Microsoft Tai Le
+    color = "black", 
+    max.overlaps = Inf,  # Set max.overlaps to Inf to label all points
+    box.padding = 0.5, point.padding = 0.2,
+    min.segment.length = 0.6,
+  ) +
+    scale_fill_manual(
+      values = c("Positive" = upregulated_inner, "Negative" = downregulated_inner, "Opposite" = nonsig_inner)
+    ) +
+    scale_color_manual(
+      values = c("Positive" = upregulated_rim, "Negative" = downregulated_rim, "Opposite" = nonsig_rim)
+    ) +
+    theme_minimal(base_size = 14) +
+    labs(
+      title = paste("Correlation of RNA-seq and Proteomics in", region_name),
+      x = "RNA-seq log2 Fold Change",
+      y = "Proteomics log2 Fold Change",
+      fill = "Direction",
+      color = "Direction"
+    ) +
+    theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title.x = element_text(size = 14, margin = margin(t = 10), face = "bold"),
+    axis.title.y = element_text(size = 14, margin = margin(r = 10), face = "bold"),
+    axis.text = element_text(size = 12, color = "grey30"),
+    panel.grid.major = element_blank(),  # Remove all major grid lines
+    panel.grid.minor = element_blank(),  # Remove all minor grid lines
+    plot.background = element_rect(fill = "transparent", color = NA),  # Transparent plot background
+    panel.background = element_rect(fill = "transparent", color = NA),  # Transparent panel background
+    legend.background = element_rect(fill = "transparent", color = NA),  # Transparent legend background
+    legend.position = "top"
+  ) +
+  # Add only the 0 x and 0 y lines as dotted lines
+  geom_hline(yintercept = 0, linetype = "dotted", color = "grey40", size = 0.8) +  # Dotted line at y = 0
+  geom_vline(xintercept = 0, linetype = "dotted", color = "grey40", size = 0.8)  # Dotted line at x = 0
+
+  # Step 6: Create scatter plot without labels by removing geom_text_repel()
+  plot_unlabeled <- ggplot(merged_data, aes(x = logFC_RNA, y = logFC_Protein)) +
+    geom_point(
+      aes(
+        fill = Category,
+        color = Category
+      ),
+      size = 4, shape = 21, stroke = 1.2  # Use shape = 21 to allow separate fill and color; stroke controls rim thickness
+    ) +
+    geom_smooth(method = "lm", formula = 'y ~ x', color = "black", linetype = "solid", se = FALSE) +  # Add linear fit line
+    scale_fill_manual(
+      values = c("Positive" = upregulated_inner, "Negative" = downregulated_inner, "Opposite" = nonsig_inner)
+    ) +
+    scale_color_manual(
+      values = c("Positive" = upregulated_rim, "Negative" = downregulated_rim, "Opposite" = nonsig_rim)
+    ) +
+    theme_minimal(base_size = 14) +
+    labs(
+      title = paste("Correlation of RNA-seq and Proteomics in", region_name),
+      x = "RNA-seq log2 Fold Change",
+      y = "Proteomics log2 Fold Change",
+      fill = "Direction",
+      color = "Direction"
+    ) +
+theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title.x = element_text(size = 14, margin = margin(t = 10), face = "bold"),
+    axis.title.y = element_text(size = 14, margin = margin(r = 10), face = "bold"),
+    axis.text = element_text(size = 12, color = "grey30"),
+    panel.grid.major = element_blank(),  # Remove all major grid lines
+    panel.grid.minor = element_blank(),  # Remove all minor grid lines
+    plot.background = element_rect(fill = "transparent", color = NA),  # Transparent plot background
+    panel.background = element_rect(fill = "transparent", color = NA),  # Transparent panel background
+    legend.background = element_rect(fill = "transparent", color = NA),  # Transparent legend background
+    legend.position = "top"
+  ) +
+  # Add only the 0 x and 0 y lines as dotted lines
+  geom_hline(yintercept = 0, linetype = "dotted", color = "grey40", size = 0.8) +  # Dotted line at y = 0
+  geom_vline(xintercept = 0, linetype = "dotted", color = "grey40", size = 0.8)  # Dotted line at x = 0
+
+  # Step 7: Save both labeled and unlabeled plots
+  labeled_output_file <- file.path(output_dir, paste0(region_name, "_RNA_vs_Protein_Correlation_Labeled.png"))
+  unlabeled_output_file <- file.path(output_dir, paste0(region_name, "_RNA_vs_Protein_Correlation_Unlabeled.png"))
+  
+  # Save labeled version
+  ggsave(filename = labeled_output_file, plot = plot_labeled, width = 8, height = 6, dpi = 600, bg = "transparent")
+  cat("Labeled plot saved to: ", labeled_output_file, "\n")
+  
+  # Save unlabeled version
+  ggsave(filename = unlabeled_output_file, plot = plot_unlabeled, width = 8, height = 6, dpi = 600, bg = "transparent")
+  cat("Unlabeled plot saved to: ", unlabeled_output_file, "\n")
+  
+  return(merged_data)
+}
+
+# Create output directory if it doesn't exist
+output_dir <- "../output"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Example of calling the function for the LA region
+create_scatter_plot(DEGs = DEGs_LA, DEPs = DEPs_LA, region_name = "LA", output_dir = output_dir)
+create_scatter_plot(DEGs = DEGs_RA, DEPs = DEPs_RA, region_name = "RA", output_dir = output_dir)
+
+
+```
+
+# Venn diagram over shared upregulated protein/gene pairs across atria
+```{r, Shared_gene/protein Pairs}
+# Create Category column for LA
+# Ensure DEGs and DEPs are data.tables
+DEGs_LA <- as.data.table(DEGs_LA)
+DEPs_LA <- as.data.table(DEPs_LA)
+DEGs_RA <- as.data.table(DEGs_RA)
+DEPs_RA <- as.data.table(DEPs_RA)
+
+# Merge data for Left Atrium (LA)
+# Merge data for Left Atrium (LA)
+merged_LA <- merge(
+  DEGs_LA[, .(GENENAME = toupper(GENENAME), logFC_RNA = logFC)],  # Convert to uppercase
+  DEPs_LA[, .(GENENAME = toupper(Genename), logFC_Protein = logFC)],  # Convert to uppercase
+  by = "GENENAME",  # Perform merge on normalized column
+  all = FALSE)  # Keep only matching rows
+merged_RA <- merge(
+  DEGs_RA[, .(GENENAME = toupper(GENENAME), logFC_RNA = logFC)],  # Convert to uppercase
+  DEPs_RA[, .(GENENAME = toupper(Genename), logFC_Protein = logFC)],  # Convert to uppercase
+  by = "GENENAME",  # Perform merge on normalized column
+  all = FALSE)  # Keep only matching rows
+
+
+
+
+if (!"Category" %in% colnames(merged_LA)) {
+  merged_LA <- merged_LA %>%
+    mutate(
+      Category = case_when(
+        logFC_RNA > 0 & logFC_Protein > 0 ~ "Positive",
+        logFC_RNA < 0 & logFC_Protein < 0 ~ "Negative",
+        TRUE ~ "Opposite"
+      )
+    )
+}
+
+# Create Category column for RA
+if (!"Category" %in% colnames(merged_RA)) {
+  merged_RA <- merged_RA %>%
+    mutate(
+      Category = case_when(
+        logFC_RNA > 0 & logFC_Protein > 0 ~ "Positive",
+        logFC_RNA < 0 & logFC_Protein < 0 ~ "Negative",
+        TRUE ~ "Opposite"
+      )
+    )
+}
+
+# Step 1: Extract upregulated genes from LA and RA
+upregulated_genes_LA <- merged_LA[Category == "Positive", .(GENENAME)]
+upregulated_genes_RA <- merged_RA[Category == "Positive", .(GENENAME)]
+
+
+# Convert to character vectors for use in Venn diagram
+upregulated_genes_LA <- unique(upregulated_genes_LA$GENENAME)
+upregulated_genes_RA <- unique(upregulated_genes_RA$GENENAME)
+
+# Create a named list of upregulated genes for LA and RA to be used in the Venn diagram
+gene_lists <- list(
+  "LA Upregulated" = upregulated_genes_LA,
+  "RA Upregulated" = upregulated_genes_RA
+)
+
+# Create the Venn diagram using the ggvenn package with updated theme
+venn_plot <- ggvenn(
+  gene_lists,                              # List of genes for Venn diagram
+  fill_color = viridis(2),                  # Use the viridis color palette for fills
+  stroke_color = "black",                   # Use black stroke for circle borders
+  show_elements = FALSE,                    # Do not show individual elements inside the Venn diagram
+  text_size = 5,                            # Set text size for readability
+  set_name_size = 6                         # Set size of set names
+) +
+  theme_void() +                            # Remove background grid lines and default ggplot theme elements
+  theme(
+    legend.position = "none",               # Remove legend for a cleaner plot
+    plot.title = element_text(size = 14, face = "bold", family = "Microsoft Tai Le"),  # Adjust title font size and type
+    plot.caption = element_text(size = 10, family = "Microsoft Tai Le"),              # Adjust caption font size and type
+    plot.background = element_rect(fill = "transparent", color = NA),  # Transparent plot background
+    panel.background = element_rect(fill = "transparent", color = NA),  # Transparent panel background
+    panel.border = element_blank()                                     # Remove panel borders
+  ) +
+  ggtitle("Overlap of Upregulated Genes in LA and RA") +               # Add title to Venn diagram
+  labs(caption = "Generated using ggvenn and Viridis color palette")   # Add caption to the plot
+
+# Display the plot
+print(venn_plot)
+
+# Save the plot to the output directory
+output_file <- "../output/venn_diagram_hq.png"
+ggsave(filename = output_file, plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in", bg = "transparent")
+
+cat("Venn diagram saved to: ", output_file, "\n")
+
+print(upregulated_genes_LA)
+print(upregulated_genes_RA)
+
+# Shared Gene Pairs
+## phosphofructokinase-platelet (PFKP) as a stress-induced glycolytic enzyme in CMs
+## 
+
+
+```
+
+
+
+# Session Info
+```{r session_info}
+sessionInfo()
+```
+

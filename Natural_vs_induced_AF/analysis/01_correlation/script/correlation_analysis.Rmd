@@ -1,0 +1,604 @@
+---
+title: "Differential Gene Expression"
+author: "Simon Haugaard"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required R libraries
+```{r library}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("edgeR", "readr", "readxl", "biomaRt", "magrittr", "tibble", "stringr", 
+               "ggplot2", "data.table", "patchwork", "openxlsx", "aamisc", "limma", 
+               "devtools", "dplyr", "RColorBrewer", "ggrepel", "ComplexUpset")
+
+# install aamisc package for MDS and Volcano plots if not already done
+# Uncomment if needed to install the aamisc package
+#pacman::p_load("qvalue", "rain", "limma", "devtools")
+#url <- "https://cran.r-project.org/src/contrib/Archive/HarmonicRegression/HarmonicRegression_1.0.tar.gz"
+#pkgFile <- "HarmonicRegression_1.0.tar.gz"
+#download.file(url = url, destfile = pkgFile)
+#install.packages(pkgs=pkgFile, type="source", repos=NULL)
+#file.remove(pkgFile)
+#pacman::p_load_gh("altintasali/aamisc")
+
+# Color scheme and shapes for figures
+RA_colors <- c("#003049", "#0073af")
+LA_colors <- c("#d62828", "#e77d7d")
+
+# Shape 16 (circle) for Control and Shape 17 (triangle) for AF
+condition_shapes <- c("Induced AF" = 15, "Natural AF" = 17)
+chamber_colors <- c("RA" = "#003049", "LA" = "#d62828") 
+chamber_fill_colors <- c("RA" = "#0073af", "LA" = "#e77d7d")
+
+
+```
+# Read data
+## Count matrix and metadata
+```{r read_data}
+# Load raw RNA-seq count data from the specified file path.
+count_file <- "../../../data/count/gene-expression-all-reverse-stranded-countReadPairs.tsv"
+count <- readr::read_delim(count_file)
+
+# Remove specific horses from the analysis (metformin horses)
+# only horses relevant to the experimental design are included.
+count <- count %>%
+  select(-c(M1_LA, M1_RA, M11_LA, M11_RA, M13_LA, M13_RA, M17_LA, M17_RA, M19_LA, M19_RA, M23_LA, M23_RA, M3_LA, M3_RA, M5_LA, M5_RA, M7_LA, M7_RA, M9_LA, M9_RA, M18_LA, M18_RA, M24_LA, M24_RA, M25_LA, M25_RA, M4_LA, M4_RA))
+
+# Load metadata associated with the samples from an Excel file.
+meta_file <- "../../../data/metadata/meta.xlsx" 
+meta <- readxl::read_excel(meta_file)
+
+# Load and process gene annotation data.
+# `geneinfo_file` contains information about gene identifiers, descriptions, and positions.
+geneinfo_file <- "../../../data/gene_annotation/horse_gene_annotation.tsv.gz"
+geneinfo <- fread(geneinfo_file)
+
+# Set column names for the gene annotation data and remove unnecessary columns.
+colnames(geneinfo)
+setnames(geneinfo, new = c("ENSEMBL", "ENSEMBLv", "Description_detailed", 
+                           "Chr", "Start", "End", "Strand", "GENENAME", "ENTREZID", "Description"))
+geneinfo <- geneinfo[, c("ENSEMBLv", "Description_detailed") := NULL]
+geneinfo <- geneinfo[!duplicated(ENSEMBL), ]
+
+# Merge count data with gene annotation information.
+# This ensures that the count matrix has relevant gene annotations for downstream analysis.
+annot <- merge(x = count[,c("Geneid", "Length")], 
+               y = geneinfo, 
+               by.x = "Geneid",
+               by.y = "ENSEMBL", 
+               all.x = TRUE, 
+               all.y = FALSE)
+setnames(annot, old = "Geneid", new = "ENSEMBL")
+annot <- data.frame(annot)
+rownames(annot) <- annot$ENSEMBL
+
+# Write the cleaned and merged annotation file for future reference.
+fwrite(x = annot, 
+       file = "../../../data/gene_annotation/horse_gene_annotation_filtered.tsv.gz", 
+       sep = "\t")
+
+# Clean up the metadata file and ensure correct row names.
+meta <- meta %>% remove_rownames %>% column_to_rownames(var="Sample_ID")
+head(meta)
+
+# Clean count matrix to remove unnecessary columns and set row names.
+count <- count[, -c(2:6)]   # Remove columns not relevant for differential expression analysis
+count <- count %>% remove_rownames %>% column_to_rownames(var="Geneid")
+head(count)
+```
+# `edgeR` differential expression analysis for multilevel designs
+## Read count matrix
+
+```{r edgeR_read, warning=FALSE}
+# Remove version numbers from gene names if present (e.g., "Gene.1" -> "Gene").
+rownames(count) <- stringr::str_split_fixed(string = rownames(count), 
+                                        pattern = '[.]',
+                                        n = 2)[,1]
+
+# Reorder metadata and annotation tables to match the column order of the count matrix.
+column_order <- names(count)
+meta_reordered <- meta[column_order, , drop = FALSE]
+
+annot_order <- rownames(count)
+annot_reordered <- annot[annot_order, ]
+
+# Create a DGEList object for `edgeR` analysis.
+# The DGEList object contains the count matrix, gene annotation, and sample metadata.
+d <- DGEList(counts = count, genes = annot_reordered, samples = meta_reordered)
+```
+
+## Filtering
+```{r edgeR_filter, warning=FALSE}
+# Filter out genes with low expression across all samples.
+design <- model.matrix(~0 + Condition , d$samples)
+colnames(design) <- gsub("Condition", "", colnames(design))
+design
+keep <- filterByExpr(d, design = design)
+table(keep)  # Display the number of genes retained after filtering.
+
+# Subset the DGEList object to keep only the filtered genes.
+y <- d[keep, , keep.lib.sizes=FALSE]
+```
+
+## Normalization
+```{r edgeR_normalize, warning=FALSE}
+# Calculate normalization factors to adjust for differences in library sizes between samples.
+y <- calcNormFactors(y)
+
+# Create design matrix for linear modeling in edgeR
+# Condition refers to different experimental conditions (e.g., Treatment, Control)
+design <- model.matrix(~0 + Condition , y$samples)
+colnames(design) <- gsub("Condition", "", colnames(design))
+
+# Estimate dispersion values to model the variance of expression.
+y <- estimateDisp(y, design)
+
+# Calculate normalized expression levels (CPM - Counts Per Million)
+CPM <- cpm(y)
+logCPM <- cpm(y, log = TRUE)
+```
+
+### Count distributions
+```{r plot_distributions}
+# Transform the logCPM matrix into long format for ggplot2 visualization.
+# This will allow each gene/sample pair to be plotted individually.
+logCPM_melted <- data.table::melt(logCPM)
+
+# Rename columns for better readability and consistency.
+# "Var1" and "Var2" refer to the dimensions of the matrix and are renamed to "Gene" and "Sample".
+setnames(x = logCPM_melted, 
+         old = c("Var1", "Var2", "value"),
+         new = c("Gene", "Sample", "logCPM"))
+
+# Add experimental conditions like "Group" or "Region" to each sample for coloring in the plots.
+logCPM_melted <- data.table::merge.data.table(x = logCPM_melted, 
+                                              y = data.table(Sample = rownames(meta), meta), 
+                                              by = "Sample")
+
+# Color the boxes based on the experimental condition to highlight potential differences.
+ggplot(logCPM_melted, aes(x = Sample, y = logCPM)) + 
+  geom_boxplot(aes(color = Condition)) +   
+  theme_bw() +                             
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +  
+  ggtitle("logCPM boxplots")             
+
+# Create density plots of logCPM values for each sample.
+# This visualization helps to assess the distribution of expression values and identify batch effects.
+ggplot(logCPM_melted, aes(x = logCPM)) + 
+  geom_density(aes(group = Sample, color = Condition)) +  
+  theme_bw() +                                           
+  ggtitle("logCPM density distributions")                
+```
+
+## Dimension reduction
+### PCA Plot All horses (un-corrected)
+```{r PCA, fig.height=10, fig.width=10}
+# Define custom colors and shapes for PCA plots
+condition_shapes <- c("Induced_AF" = 15, "Natural_AF" = 17)  # Square for Induced, Triangle for Natural AF
+
+# Perform PCA on the logCPM values
+pca <- prcomp(t(logCPM))  # Transpose logCPM so that samples are in rows and genes are in columns
+
+# Extract PCA scores
+pca_scores <- as.data.frame(pca$x)  # PCA scores
+pca_scores$Sample <- rownames(pca_scores)  # Add sample names
+
+# Merge with metadata for plotting
+pca_scores <- merge(pca_scores, meta, by.x = "Sample", by.y = "row.names")
+
+# Define dimensions for plotting
+dims <- list(p1 = c("PC1", "PC2"), p2 = c("PC1", "PC3"), p3 = c("PC1", "PC4"))
+pca_plot <- list()
+
+# Without labels
+for (i in seq_along(dims)){
+  pca_plot[[i]] <- ggplot(pca_scores, aes_string(x = dims[[i]][1], y = dims[[i]][2], color = "Region", shape = "Group")) +
+    geom_point(size = 4, alpha = 0.8) +
+    scale_color_manual(values = chamber_colors) +
+    scale_shape_manual(values = condition_shapes) +
+    theme_minimal() +
+    labs(title = paste("PCA:", dims[[i]][1], "vs", dims[[i]][2]), x = dims[[i]][1], y = dims[[i]][2]) +
+    theme(legend.position = "right")
+}
+
+# Combine plots using patchwork
+patchwork::wrap_plots(pca_plot, ncol = 2) + patchwork::plot_layout(guides = 'collect')
+
+# With labels
+for (i in seq_along(dims)){
+  pca_plot[[i]] <- ggplot(pca_scores, aes_string(x = dims[[i]][1], y = dims[[i]][2], color = "Region", shape = "Group", label = "Horse")) +
+    geom_point(size = 4, alpha = 0.8) +
+    geom_text(vjust = -0.5, size = 3) +  # Add labels for each sample
+    scale_color_manual(values = chamber_colors) +
+    scale_shape_manual(values = condition_shapes) +
+    theme_minimal() +
+    labs(title = paste("PCA:", dims[[i]][1], "vs", dims[[i]][2]), x = dims[[i]][1], y = dims[[i]][2]) +
+    theme(legend.position = "right")
+}
+
+# Combine labeled plots using patchwork
+patchwork::wrap_plots(pca_plot, ncol = 2) + patchwork::plot_layout(guides = 'collect')
+
+### Extract top loadings
+# Define a function to extract the top contributing genes for each component
+get_top_loadings <- function(pca_obj, pc_num, top_n = 10) {
+  # Extract loadings for the specified component
+  loadings <- pca_obj$rotation[, pc_num]
+  
+  # Get the top genes with highest absolute loadings
+  top_genes <- sort(abs(loadings), decreasing = TRUE)[1:top_n]
+  
+  # Extract gene names and actual loading values for the top genes
+  top_loadings <- data.frame(
+    Gene = names(top_genes),         # Gene names
+    Loading = loadings[names(top_genes)],  # Loading values
+    PC = paste0("PC", pc_num)        # Principal Component identifier
+  )
+  
+  return(top_loadings)
+}
+
+```
+
+### PCA Plot Natural and Induced AF - Batch effect removed - Figure 3
+```{r PCA_Batch_Corrected, fig.height=10, fig.width=10}
+# Remove batch effect using `removeBatchEffect` before PCA
+logCPM_batchRemoved <- removeBatchEffect(logCPM, batch = y$samples$Horse, design = design)
+
+# Perform PCA on batch-corrected logCPM values
+pca_batchRemoved <- prcomp(t(logCPM_batchRemoved))
+
+# Extract PCA scores and add sample information
+pca_scores <- as.data.frame(pca_batchRemoved$x)  
+pca_scores$Sample <- rownames(pca_scores)  
+
+# Merge PCA scores with metadata
+pca_scores <- merge(pca_scores, meta, by.x = "Sample", by.y = "row.names")
+
+# Define dimensions for PCA plotting
+dims <- list(p1 = c("PC1", "PC2"), p2 = c("PC2", "PC3"), p3 = c("PC1", "PC4"))
+pca_plot <- list()
+
+# Create PCA plots without labels
+for (i in seq_along(dims)){
+  pca_plot[[i]] <- ggplot(pca_scores, aes_string(x = dims[[i]][1], y = dims[[i]][2], color = "Region", shape = "Group")) +
+    geom_point(size = 4, alpha = 0.8) +
+    scale_color_manual(values = chamber_colors) +
+    scale_shape_manual(values = condition_shapes) +
+    theme_minimal() +
+    labs(title = paste("PCA:", dims[[i]][1], "vs", dims[[i]][2]), x = dims[[i]][1], y = dims[[i]][2]) +
+    theme(legend.position = "right")
+}
+
+# Combine PCA plots using patchwork
+patchwork::wrap_plots(pca_plot, ncol = 2) + patchwork::plot_layout(guides = 'collect')
+
+# Create PCA plots with labels for each sample
+for (i in seq_along(dims)){
+  pca_plot[[i]] <- ggplot(pca_scores, aes_string(x = dims[[i]][1], y = dims[[i]][2], color = "Region", shape = "Group", label = "Horse")) +
+    geom_point(size = 4, alpha = 0.8) +
+    geom_text(vjust = -0.5, size = 3) +  # Add labels for each sample
+    scale_color_manual(values = chamber_colors) +
+    scale_shape_manual(values = condition_shapes) +
+    theme_minimal() +
+    labs(title = paste("PCA:", dims[[i]][1], "vs", dims[[i]][2]), x = dims[[i]][1], y = dims[[i]][2]) +
+    theme(legend.position = "right")
+}
+
+# Combine labeled PCA plots using patchwork
+patchwork::wrap_plots(pca_plot, ncol = 2) + patchwork::plot_layout(guides = 'collect')
+
+# Find top loadings
+## Function to get all loadings for specified principal components and save to one file
+extract_all_loadings <- function(pca_obj, pcs = 1:6, annot) {
+  # Extract all loadings for the specified principal components
+  all_loadings <- pca_obj$rotation[, pcs, drop = FALSE]
+  
+  # Convert to a data frame for easy manipulation
+  loadings_df <- as.data.frame(all_loadings)
+  
+  # Add ENSEMBL IDs as a column
+  loadings_df$ENSEMBL <- rownames(loadings_df)
+  
+  # Merge with annotation to include gene names
+  loadings_df <- merge(loadings_df, annot[, c("ENSEMBL", "GENENAME")], by = "ENSEMBL", all.x = TRUE)
+  
+  # Rearrange columns to have GENENAME and ENSEMBL first for clarity
+  loadings_df <- loadings_df[, c("GENENAME", "ENSEMBL", colnames(loadings_df)[1:(ncol(loadings_df) - 2)])]
+  
+  return(loadings_df)
+}
+
+# Extract loadings for PC1 to PC6
+all_loadings_df <- extract_all_loadings(pca_obj = pca_batchRemoved, pcs = 1:6, annot = annot_reordered)
+
+# Save the combined loadings to a single CSV file
+write.csv(all_loadings_df, file = "../output/All_Loadings_PC1_to_PC6.csv", row.names = FALSE)
+
+# Preview the combined loadings
+head(all_loadings_df)
+
+# Source the helper functions
+source("pca_helpers_all_samples.R")
+
+# Function to extract loadings based on highlighted genes
+extract_and_map_loadings <- function(pca_obj, gene_list, annot) {
+  ensembl_ids <- annot$ENSEMBL[match(gene_list, annot$GENENAME)]
+  ensembl_ids <- ensembl_ids[!is.na(ensembl_ids)]
+  valid_ids <- intersect(ensembl_ids, rownames(pca_obj$rotation))
+
+  if (length(valid_ids) == 0) {
+    warning("No matching ENSEMBL IDs found in PCA loadings.")
+    return(NULL)
+  }
+
+  loadings_df <- as.data.frame(pca_obj$rotation[valid_ids, , drop = FALSE])
+  loadings_df$ENSEMBL <- rownames(loadings_df)
+  loadings_df <- merge(loadings_df, annot[, c("ENSEMBL", "GENENAME")], by = "ENSEMBL", all.x = TRUE)
+  
+  return(loadings_df)
+}
+
+### FOR PC1 & PC2
+
+# Highlighted genes for PCA loadings extraction
+highlighted_genes <- c("PITX2", "KCNV2", "KCNN2", "MYH7", "LMOD3", "ADAMTS4", "BMP10", "PTX3")
+specific_loadings_df <- extract_and_map_loadings(pca_batchRemoved, highlighted_genes, annot_reordered)
+pca_batchRemoved <- prcomp(t(logCPM_batchRemoved))
+pca_scores <- as.data.frame(pca_batchRemoved$x)  # PCA scores
+pca_scores$Sample <- rownames(pca_scores)  # Add sample names
+pca_scores <- merge(pca_scores, meta, by.x = "Sample", by.y = "row.names")
+
+# Generate PCA plots without and with labels
+dimensions <- list(c("PC1", "PC2"))
+
+# Generate and display PCA plots for all samples (both healthy and disease groups)
+generate_and_save_pca_plots(
+  pca_df = pca_scores,
+  loadings_df = specific_loadings_df,
+  dimensions = dimensions,
+  colors = chamber_colors,
+  shapes = condition_shapes,  # Include shapes for control/disease
+  add_ellipse = FALSE,  # Optionally toggle to TRUE if ellipses are needed
+  shape_var = "Group"  # Use Group as the shape variable
+)
+
+### FOR PC2 & PC3, PC1 & PC4
+
+# Highlighted genes for PCA loadings extraction
+highlighted_genes <- c("PITX2", "KCNV2", "KCNN2", "MYH7", "LMOD3", "SCNN1B", "ADAMTS4", "PDK4", "BMP10", "BBOX1")
+specific_loadings_df <- extract_and_map_loadings(pca_batchRemoved, highlighted_genes, annot_reordered)
+print(specific_loadings_df)
+pca_batchRemoved <- prcomp(t(logCPM_batchRemoved))
+pca_scores <- as.data.frame(pca_batchRemoved$x)  # PCA scores
+pca_scores$Sample <- rownames(pca_scores)  # Add sample names
+pca_scores <- merge(pca_scores, meta, by.x = "Sample", by.y = "row.names")
+
+dimensions <- list(c("PC1", "PC3"), c("PC2", "PC3"))
+generate_and_save_pca_plots(
+  pca_df = pca_scores,
+  loadings_df = specific_loadings_df,
+  dimensions = dimensions,
+  colors = chamber_colors,
+  shapes = condition_shapes,  # Include shapes for control/disease
+  add_ellipse = FALSE,  # Optionally toggle to TRUE if ellipses are needed
+  shape_var = "Group"  # Use Group as the shape variable
+)
+
+### Extract variance explained by each component
+# Extract the standard deviation of each principal component
+pca_sdev <- pca_batchRemoved$sdev
+
+# Calculate the variance explained by each component
+variance_explained <- (pca_sdev^2) / sum(pca_sdev^2)
+
+# Convert to a data frame for easier viewing
+variance_explained_df <- data.frame(
+  Principal_Component = paste0("PC", 1:length(variance_explained)),
+  Variance_Explained = variance_explained,
+  Cumulative_Variance = cumsum(variance_explained)
+)
+
+# Print variance explained by each component
+print(variance_explained_df)
+
+```
+
+# Differential expression analysis 
+## Create contrast for multilevel design
+```{r edgeR_contrast}
+# Define contrasts to test specific hypotheses using the design matrix.
+colnames(design)  # Display the names of the coefficients in the design matrix to verify the structure.
+
+# Define the contrasts based on experimental design and hypotheses
+con <- makeContrasts(
+  
+  # Compare Natural AF vs. Induced AF in the Left Atrium
+  Natural_vs_Induced_AF_LA = Natural_AF_LA - LA_Induced_AF,
+  
+  # Compare Natural AF vs. Induced AF in the Right Atrium
+  Natural_vs_Induced_AF_RA = Natural_AF_RA - RA_Induced_AF,
+  
+  # Average Effect of Induced AF vs. Natural AF across both atria
+  Average_Natural_vs_Induced_AF = ((Natural_AF_LA + Natural_AF_RA) / 2) - ((LA_Induced_AF + RA_Induced_AF) / 2),
+  
+  # Regional Difference: Induced AF in RA vs. LA
+  Induced_RA_vs_LA = RA_Induced_AF - LA_Induced_AF,
+  
+  # Regional Difference: Natural AF in RA vs. LA
+  Natural_RA_vs_LA = Natural_AF_RA - Natural_AF_LA,
+  
+  # Interaction Term: Is the effect of Natural vs. Induced AF different between RA and LA?
+  Interaction_Natural_vs_Induced = (Natural_AF_RA - RA_Induced_AF) - (Natural_AF_LA - LA_Induced_AF),
+  
+  # Specify the levels of the design matrix
+  levels = design
+)
+
+con
+
+```
+
+## Differential analysis
+```{r voomLmFit, fig.height=7, fig.width=7}
+# Perform differential expression analysis using `voomLmFit` function.
+# This approach is suitable for RNA-seq data with complex experimental designs, such as multilevel/paired design models.
+# The `block` argument specifies a blocking factor (Horse ID)
+
+y_raw <- d[keep, ,keep.lib.sizes=FALSE]  # keep only filtered genes.
+
+# Fit a linear model using the `voomLmFit` function with voom transformation.
+# `plot = TRUE` will display the mean-variance trend, a diagnostic plot for voom transformation.
+v <- voomLmFit(counts = y_raw, 
+               design = design, 
+               block = as.factor(y_raw$samples$Horse),  # Block by Horse ID to account for repeated measures/paired design (two atrial samples per horse).
+               sample.weights = TRUE, 
+               plot = TRUE)
+
+# Initialize an empty list to store differential expression results for each contrast.
+res <- list()  
+
+# Loop through each contrast and perform differential analysis.
+for (i in colnames(con)) {
+  # Fit the contrast matrix to the linear model.
+  fit <- contrasts.fit(v, contrasts = con)
+  
+  # Apply empirical Bayes moderation to the standard errors to improve statistical power.
+  fit <- eBayes(fit, robust = TRUE)
+  
+  # Extract the top differentially expressed genes for each contrast.
+  res[[i]] <- topTable(fit, coef = i, number = Inf)
+  
+  # Add the contrast name as a new column in the result table for easier identification.
+  res[[i]] <- data.frame(res[[i]], Contrast = i)
+  
+  # Print the number of differentially expressed (DE) genes with adjusted p-value < 0.05.
+  n <- res[[i]] %>% dplyr::filter(adj.P.Val < 0.05) %>% nrow 
+  print(paste('Number of DE genes for', i, '=', n))
+}
+
+# Combine all contrast results into a single data frame for easier output and visualization.
+res_all <- do.call(rbind, res)
+
+# Create an output Excel file with results for each contrast.
+# Uncomment to save
+ openxlsx::write.xlsx(x = res, file = "../../../analysis/01_dge/output/dge_results.xlsx", asTable = TRUE)
+
+# Create an output TSV file with the combined results for all contrasts.
+# Uncomment to save
+ data.table::fwrite(x = res_all, file = "../../../analysis/01_dge/output/dge_results.tsv.gz", sep = "\t")
+```
+## Diagnostics for differential analysis
+### p-value histograms
+```{r pvalue_histograms, fig.height=10, fig.width=10}
+# Create p-value histograms for each contrast.
+# This visualization helps assess the distribution of p-values and identify potential issues
+ggplot(res_all, aes(x = P.Value)) + 
+  geom_histogram(fill = "lightgray",       
+                 color = "black",          
+                 breaks = seq(0, 1, by = 0.05), 
+                 closed = "right",         
+                 lwd = 0.2) +              
+  facet_wrap(~ Contrast, nrow = 3, scales = "free") +  
+  theme_bw()  
+```
+
+### Volcano plots
+```{r volcano_plots, fig.height=10, fig.width=10}
+volcano_plots <- list()
+for (i in names(res)){
+  volcano_plots[[i]] <- ggVolcano(x = res[[i]], 
+                                  fdr = 0.05,
+                                  fdr.column = "adj.P.Val", 
+                                  pvalue.column = "P.Value", 
+                                  logFC = 0, 
+                                  logFC.column = "logFC", 
+                                  text.size = 2) + 
+    theme_bw(base_size = 10) + 
+    ggtitle(i)
+}
+
+# Combine all volcano plots into a single layout with 3 columns.
+patchwork::wrap_plots(volcano_plots, ncol = 3)
+
+```
+### Volcano Plot Custom
+```{r volcano_plots_custom, fig.height=10, fig.width=10}
+regions <- unique(meta$Region)
+
+# Gene Name Mapping for Volcano Plots in RNA-seq Analysis
+# Check if the annotation dataframe has the necessary columns
+if (!"ENSEMBL" %in% colnames(annot_reordered) || !"GENENAME" %in% colnames(annot_reordered)) {
+  stop("Error: The annotation dataframe must contain both 'ENSEMBL' and 'GENENAME' columns.")
+}
+# Create a named vector for ENSEMBL to GENENAME mapping
+ensembl_to_genename <- setNames(annot_reordered$GENENAME, annot_reordered$ENSEMBL)
+# Map ENSEMBL IDs to GeneNames in the res list
+for (contrast_name in names(res)) {
+  # Ensure the dataframe has ENSEMBL IDs as rownames
+  if (!"ENSEMBL" %in% colnames(res[[contrast_name]])) {
+    res[[contrast_name]]$ENSEMBL <- rownames(res[[contrast_name]])
+  }
+  
+  # Map GENENAMEs to the dataframe using ENSEMBL IDs
+  res[[contrast_name]]$GENENAME <- ensembl_to_genename[res[[contrast_name]]$ENSEMBL]
+  
+  # Replace NA values in GENENAME with ENSEMBL IDs (to ensure plotting works even if some gene names are missing)
+  res[[contrast_name]]$GENENAME[is.na(res[[contrast_name]]$GENENAME)] <- res[[contrast_name]]$ENSEMBL[is.na(res[[contrast_name]]$GENENAME)]
+}
+
+
+# Source the helper function
+source("volcano_helpers.R")
+
+# Create lists to store both versions of volcano plots
+volcano_plots_no_labels <- list()
+volcano_plots_with_labels <- list()
+
+# Iterate over each contrast in `res` and create custom volcano plots with/without labels
+for (contrast_name in names(res)) {
+  # Ensure the GeneName column is present in the dataframe for labeling
+  if (!"GeneName" %in% colnames(res[[contrast_name]])) {
+    # Map ENSEMBL to GeneName using the preprocessed mapping vector
+    res[[contrast_name]]$GeneName <- sapply(rownames(res[[contrast_name]]), function(x) gsub(".*_", "", x))
+  }
+  
+  # Generate volcano plots with and without labels using the helper function
+  volcano_plots <- create_custom_volcano_plot(
+    df = res[[contrast_name]],
+    logFC_col = "logFC",
+    pvalue_col = "P.Value",
+    adj_pvalue_col = "adj.P.Val",
+    contrast_name = contrast_name,
+    fc_cutoff = 1,
+    pvalue_cutoff = 0.05,
+    save_plot = TRUE, 
+    output_path = "../output/",
+    show_labels = TRUE  # Always generate both labeled and unlabeled versions
+  )
+  
+  # Store the plots in separate lists
+  volcano_plots_no_labels[[contrast_name]] <- volcano_plots$No_Labels
+  volcano_plots_with_labels[[contrast_name]] <- volcano_plots$With_Labels
+}
+
+# Combine and display the volcano plots without labels
+patchwork::wrap_plots(volcano_plots_no_labels, ncol = 3)
+
+# Print individual volcano plots with labels for key contrasts
+print(volcano_plots_with_labels[["Natural_vs_Induced_AF_LA"]])
+print(volcano_plots_no_labels[["Natural_vs_Induced_AF_RA"]])
+
+```
+

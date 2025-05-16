@@ -1,0 +1,7 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+"*.tsv" 
+"*.gz" 
+Natural_vs_induced_AF/data/gene_annotation/human_GO.tsv 

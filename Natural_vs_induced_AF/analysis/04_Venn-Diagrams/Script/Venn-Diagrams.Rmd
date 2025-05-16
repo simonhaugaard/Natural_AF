@@ -1,0 +1,105 @@
+---
+title: "RNA/Protein Overlap"
+author: "Simon Haugaard"
+date: "2024-06-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Library
+```{r, Libraries and Environment Setup}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  ggvenn, edgeR, readr, readxl, biomaRt, magrittr, tibble, stringr, 
+  ggplot2, data.table, patchwork, openxlsx, dplyr, missForest, RColorBrewer, viridis, tidyr, forcats
+)
+pacman::p_load_gh("altintasali/aamisc")
+```
+
+# Ionchannel differentially expressed
+```{r,  Read and Prepare data}
+# Read in differential gene expression (DGE) results
+# Ensure correct path to DGE results file
+DGE <- fread("../../01_correlation/output/dge_results.tsv.gz")
+
+
+# Read the specific sheet "Atrial_Specific" from the Excel file
+# Ensure correct path to the Excel file and specify the sheet name
+Ion_channels <- read.xlsx("../../../data/gene_annotation/ion-channel-masterlist.xlsx")
+# Convert the Ion_channels data frame to a long format for easier processing
+ion_channel_genes <- Ion_channels %>%
+  pivot_longer(cols = everything(), names_to = "Channel_Type", values_to = "Gene") %>%
+  filter(!is.na(Gene)) %>%            # Remove NA values
+  pull(Gene)                          # Extract the Gene column as a vector
+
+sig_genes_LA <- DGE[Contrast == "Natural_vs_Induced_AF_LA" & adj.P.Val < 0.05, .(GENENAME)]
+sig_genes_RA <- DGE[Contrast == "Natural_vs_Induced_AF_RA" & adj.P.Val < 0.05, .(GENENAME)]
+
+# Ensure that sig_genes_LA and sig_genes_RA are character vectors
+sig_genes_LA <- sig_genes_LA$GENENAME  # Extract the GENENAME column as a vector
+sig_genes_RA <- sig_genes_RA$GENENAME  # Extract the GENENAME column as a vector
+
+# Now create the list for Venn diagram using character vectors
+gene_lists_genes <- list(
+  `LA Differential` = sig_genes_LA,
+  `RA Differential` = sig_genes_RA,
+  `Ion Channel Genes` = ion_channel_genes
+)
+
+# Compute overlaps using intersect with character vectors
+overlap_LA_RA_genes <- intersect(sig_genes_LA, sig_genes_RA)
+overlap_LA_ion_genes <- intersect(sig_genes_LA, ion_channel_genes)
+overlap_RA_ion_genes <- intersect(sig_genes_RA, ion_channel_genes)
+
+print(overlap_LA_RA_genes)
+print(overlap_LA_ion_genes)
+print(overlap_RA_ion_genes)
+
+# Print the number of overlapping genes
+cat("Number of overlapping genes:\n")
+cat("LA and RA Overlap (Count):", length(overlap_LA_RA_genes), "\n")
+cat("LA and Ion Channel Overlap (Count):", length(overlap_LA_ion_genes), "\n")
+cat("RA and Ion Channel Overlap (Count):", length(overlap_RA_ion_genes), "\n")
+
+# Generate the Venn diagram with numbers
+venn_plot <- ggvenn(
+  gene_lists_genes,
+  fill_color = viridis(3),  # Using viridis color palette for the fills
+  stroke_color = "black",   # White stroke color for contrast
+  show_elements = FALSE,     # Show set labels and elements counts
+  text_size = 5,            # Increase text size for readability
+  set_name_size = 6         # Increase set name size for better visualization
+) + theme_void() +          # Clean background
+  theme(
+    legend.position = "none",  # Remove legend for cleaner plot
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.caption = element_text(size = 10)
+  ) +
+  ggtitle("Overlap of Differentially Expressed Genes in LA, RA, and Atrial-Specific Genes") +
+  labs(caption = "Generated using ggvenn and Viridis color palette")
+print(venn_plot)
+ggsave(filename = "../output/venn_diagram_ion_channels_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+
+
+# Generate a Venn diagram with only circles (no text labels or numbers)
+venn_plot <- ggvenn(
+  data = gene_lists_genes,
+  fill_color = viridis(3),  # Using viridis color palette for the fills
+  stroke_color = "black",   # White stroke color for contrast
+  show_elements = FALSE,    # Remove element counts and set labels
+  set_name_size = 0,        # Set name size to 0 to hide set labels
+  text_size = 0             # Set text size to 0 to hide element counts
+) + 
+  theme_void() +            # Clean background
+  theme(
+    plot.title = element_blank(),     # Remove title
+    plot.caption = element_blank(),   # Remove caption
+    plot.margin = margin(0, 0, 0, 0)  # Remove margins around the plot
+  )
+# Save the plot as a high-quality PNG file
+ggsave(filename = "../output/venn_diagram_ion_channels_no_labels_hq.png", plot = venn_plot, device = "png", dpi = 800, width = 10, height = 8, units = "in")
+
+```

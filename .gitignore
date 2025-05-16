@@ -5,3 +5,5 @@
 "*.tsv" 
 "*.gz" 
 Natural_vs_induced_AF/data/gene_annotation/human_GO.tsv 
+Natural_vs_induced_AF/ 
+Natural_vs_induced_AF/ 
